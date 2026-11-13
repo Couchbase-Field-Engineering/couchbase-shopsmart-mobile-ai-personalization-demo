@@ -221,7 +221,7 @@ export type RecsDoc = {
 
 export type RequestStatus = 'pending' | 'processing' | 'awaiting_approval' | 'confirmed' | 'partially_shipped' | 'failed';
 
-/** An offline-first order or shopper action: created on the phone, processed by the backend through AOM. */
+/** An offline-first order or shopper action: created on the phone, processed by the backend through Couchbase Labs Agent Operations Manager. */
 export type OrderRequest = {
   _id: string;
   type: 'request';
