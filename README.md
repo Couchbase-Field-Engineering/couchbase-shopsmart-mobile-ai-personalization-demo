@@ -1,4 +1,5 @@
 # Couchbase ShopSmart · Mobile AI Personalization on Couchbase
+<img width="1280" height="920" alt="image" src="https://github.com/user-attachments/assets/648e4f3c-6e90-4968-bdde-4488afeac5b9" />
 
 An online retail shopping app for **Couchbase ShopSmart**, a fictional retailer. Each shopper's phone holds their profile, a smart cart built for them by a next-basket model, picks chosen for them, the whole catalog and their home store's aisle map in **Couchbase Lite** - so the app keeps working **in a subway tunnel with no signal**. Carts are priced on the phone, orders are captured offline and **sync back through Sync Gateway** the moment the shopper has a connection.
 
