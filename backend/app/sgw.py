@@ -1,12 +1,13 @@
 """Sync Gateway admin calls: one SG user per shopper, and session minting.
 
 The shopper signs in to this backend (member number + last name); the backend
-makes sure an SG user named after the shopper_id exists with exactly three
-channels - `shopper:<shopper_id>`, `store:<home store>` and `catalog` - and
+makes sure an SG user named after the shopper_id exists with exactly four
+channels - `shopper:<shopper_id>`, `store:<home store>`, `fc:<fulfillment
+center>` (the pricing rules) and `catalog` - and
 mints a session. The phone hands that session to Couchbase Lite's
 SessionAuthenticator, the same way mobile_field_service does, so a shopper's
 replicator can only ever pull their own profile, recommendations and orders,
-their home store and the catalog.
+their home store, their fulfillment center's pricing rules and the catalog.
 """
 from __future__ import annotations
 
@@ -25,13 +26,14 @@ def enabled() -> bool:
     return bool(config.SG_ADMIN_URL)
 
 
-async def mint_session(shopper_id: str, store_id: str | None) -> dict | None:
+async def mint_session(shopper_id: str, store_id: str | None, fc: str | None = None) -> dict | None:
     if not enabled():
         return None
     auth = (config.SG_ADMIN_USERNAME, config.SG_ADMIN_PASSWORD)
     base = f"{config.SG_ADMIN_URL}/{config.SG_DB}"
     async with httpx.AsyncClient(timeout=10, auth=auth) as c:
-        channels = [shopper_channel(shopper_id), CATALOG_CHANNEL] + ([store_channel(store_id)] if store_id else [])
+        channels = ([shopper_channel(shopper_id), CATALOG_CHANNEL] + ([store_channel(store_id)] if store_id else [])
+                    + ([f"fc:{fc}"] if fc else []))
         user = {"name": shopper_id, "password": secrets.token_urlsafe(24)}
         # Collection-scoped channel grants (SG 3.x named collections).
         user["collection_access"] = {

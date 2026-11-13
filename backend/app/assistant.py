@@ -48,12 +48,15 @@ from .store import store
 
 log = logging.getLogger("shopsmart.assistant")
 
-INTENTS = ["reorder", "pricing", "availability", "delivery", "returns", "rewards", "history", "subscription", "preferences", "general"]
+INTENTS = ["reorder", "pricing", "availability", "delivery", "returns", "rewards", "history", "subscription", "preferences", "deals",
+           "general"]
 # Context-cache keys: shopper context per intent, plus a guide-only context
 # per intent for generic questions (no shopper data in it).
 CONTEXT_KEYS = INTENTS + [f"guide_{i}" for i in INTENTS]
 
 KEYWORDS = {
+    "deals": ["deals", "deal", "offer", "offers", "promo", "promotion", "on sale", "sale today", "bundle", "bundles", "coupon",
+              "markdown", "marked down", "goes with", "go with", "pair with"],
     "rewards": ["points", "store credit", "credit", "wallet", "rewards", "membership", "member", "tier", "plus", "premier", "balance",
                 "upgrade"],
     "returns": ["return", "refund", "damaged", "wrong item", "broken", "send back", "goodwill", "exchange", "arrived"],
@@ -61,9 +64,10 @@ KEYWORDS = {
                      "cadence"],
     "availability": ["in stock", "available", "availability", "on hand", "backorder", "out of", "sold out", "aisle",
                      "limit", "limited", "more than one", "second", "where can i find", "which aisle"],
-    "delivery": ["deliver", "delivery", "ship", "shipping", "arrive", "eta", "when will", "pickup", "pick up", "same-day", "fee"],
+    "delivery": ["deliver", "delivery", "shipping", "shipped", "ships", "arrive", " eta", "when will", "pickup", "pick up",
+                 "same-day", "delivery fee"],
     "pricing": ["price", "pricing", "cost", "how much", "discount", "cheaper", "savings", "price match", "match", "competitor",
-                "multi-buy", "deal"],
+                "multi-buy"],
     "history": ["history", "last order", "last time", "previous", "ordered before", "usually", "how often", "spend", "spent",
                 "what did i", "my order", "track", "order status", "where is my"],
     "preferences": ["preference", "prefer", "favorite", "hide", "stop showing", "don't show", "not interested", "more of",
@@ -73,7 +77,7 @@ KEYWORDS = {
 }
 PROBLEM_WORDS = ("damaged", "broken", "wrong item", "crushed", "missing item", "defective")
 PERSONAL_RE = re.compile(r"\b(i|i'm|i've|i'd|im|me|my|mine|we|we're|our|us)\b", re.I)
-PERSONAL_INTENTS = {"reorder", "history"}
+PERSONAL_INTENTS = {"reorder", "history", "deals"}
 # Words that name something in the catalog: a question that mentions one needs
 # this shopper's member price and their fulfillment center's stock.
 PRODUCT_WORDS = {w for p in C.PRODUCTS for w in re.findall(r"[a-z]{3,}", (p["name"] + " " + " ".join(p["tags"])).lower())} - {
@@ -96,6 +100,7 @@ INTENT_QUERY = {
     "history": "order history spend last order replenishment",
     "subscription": "subscribe and save recurring cadence schedule",
     "preferences": "preferences favorite categories hidden categories substitutions recommendations",
+    "deals": "personal offers promotions bundles overstock markdown price drop loyalty",
     "general": "frequently asked questions policy",
 }
 
@@ -127,7 +132,8 @@ def classify(message: str) -> tuple[str, bool]:
         return "general", False
     # A policy question phrased generically ("how does a price match work?")
     # stays on the shared guide path even though its intent is shopper-capable.
-    if not PERSONAL_RE.search(message) and re.match(r"\s*(how|what|is|are|can|do|does|who|which|why)\b", m) and intent != "reorder":
+    if not PERSONAL_RE.search(message) and re.match(r"\s*(how|what|is|are|can|do|does|who|which|why)\b", m) \
+            and intent not in PERSONAL_INTENTS:
         return intent, False
     return intent, personal
 
@@ -167,7 +173,7 @@ def _local_profile_chunks(shopper: dict, intent: str) -> list[dict]:
     want = {"reorder": ["Recommendations", "Orders"], "pricing": ["Membership", "Recommendations"], "availability": ["Shopper", "Recommendations"],
             "delivery": ["Shopper"], "returns": ["Orders", "Membership"], "rewards": ["Membership"],
             "history": ["Orders"], "subscription": ["Orders", "Recommendations"], "preferences": ["Preferences", "Recommendations"],
-            "general": ["Shopper"]}[intent]
+            "deals": ["Membership", "Recommendations"], "general": ["Shopper"]}[intent]
     out = []
     for s in sections:
         if any(s.startswith(w) for w in want):
@@ -204,7 +210,7 @@ async def _catalog_lookup(shopper_id: str, message: str) -> list[dict]:
 
 
 async def _facts(shopper_id: str, intent: str) -> dict:
-    if intent in ("reorder", "pricing", "availability", "subscription", "preferences"):
+    if intent in ("reorder", "pricing", "availability", "subscription", "preferences", "deals"):
         tool = "get_recommendations"
     else:
         tool = "get_shopper_context"
@@ -359,6 +365,15 @@ def _facts_text(facts: dict) -> str:
             out.append(f"Smart cart total ${t.get('total_usd')} (saves ${t.get('savings_usd')} vs list, earns {t.get('points_earned')} points)")
         for r in (d.get("for_you") or [])[:4]:
             out.append(f"Pick for you: {r['name']} ({r['sku']}) ${r['unit_price']} - {r['reason']}")
+        for o in d.get("offers") or []:
+            out.append(f"Personal offer: {o['title']} ({o['reason']}; expires {o.get('expires')})")
+        for dl in (d.get("deals") or [])[:8]:
+            if dl["kind"] == "bundle":
+                out.append(f"Bundle: {dl['label']} - {' + '.join(dl['names'])}, {dl['pct_off']}% off each, saves ${dl.get('saves_usd')}")
+            elif dl["kind"] == "time":
+                out.append(f"This hour: {dl['label']} - {dl['reason']}")
+            else:
+                out.append(f"Deal: {dl['name']} ${dl.get('your_price')} (list ${dl.get('list_price')}) - {dl['label']}: {dl['reason']}")
         for pm in d.get("price_matches") or []:
             out.append(f"Price watch: {pm['competitor']} has {pm['name']} for ${pm['competitor_price_usd']} "
                        f"(member price ${pm['member_price_usd']}, a match saves ${pm['saving_usd']})")
@@ -376,6 +391,7 @@ def _facts_text(facts: dict) -> str:
             out.append(f"Preferences: favorites {p.get('favorite_categories') or []}, hidden {p.get('avoid_categories') or []}")
     for it in facts.get("catalog") or []:
         out.append(f"Catalog: {it['name']} ({it['sku']}) ${it['unit_price']} (list ${it['list_price']}), {it['on_hand_at_fc']} on hand"
+                   + (f", price includes {', '.join(it['deals'])}" if it.get("deals") else "")
                    + (f", aisle {it['aisle']} at the home store" if it.get("aisle") else "")
                    + (f", limit {it['limit_per_household']} per household" if it.get("limit_per_household") else ""))
     return "\n".join(out)
@@ -421,6 +437,39 @@ def compose_fallback(intent: str, personal: bool, message: str, ctx: dict, shopp
         return ("I can help with your smart cart, member prices, what's in stock, delivery and pickup, returns, store "
                 "credit and points, and Subscribe & Save.")
     tier = shopper["membership"]["tier_name"]
+    if intent == "deals":
+        offers, deals = d.get("offers") or [], d.get("deals") or []
+        items = (ctx.get("facts") or {}).get("catalog") or []
+        if items and re.search(r"go(es)? (well )?with|pair|bundle", message.lower()):
+            # Cross-sell for one item: what sells with it, and the bundle that makes it cheaper.
+            it = items[0]
+            pairs = [f"{_short(C.PRODUCT_BY_SKU[x]['name'])} ({why[0].lower() + why[1:]})" for x, why in C.PAIRS_WITH.get(it["sku"], [])
+                     if x in C.PRODUCT_BY_SKU]
+            b = next((x for x in deals if x["kind"] == "bundle" and it["sku"] in x["skus"]), None)
+            txt = (f"With {_short(it['name'])}, shoppers add " + " and ".join(pairs[:2]) + "." if pairs
+                   else f"Nothing in particular sells with {_short(it['name'])}.")
+            if b:
+                txt += (f" Put {' + '.join(b['names'])} in the cart together and each is {b['pct_off']}% off "
+                        f"(saves {money(b.get('saves_usd', 0))}).")
+            return txt
+        parts = []
+        if offers:
+            o = offers[0]
+            parts.append(f"Your offer: {o['title']}. {o['reason']}; good until {o.get('expires')}"
+                         + (f". You have {len(offers) - 1} more in the app" if len(offers) > 1 else "") + ".")
+        now = [x for x in deals if x["kind"] == "time"]
+        if now:
+            parts.append(f"This hour, {now[0]['label']}: {now[0]['reason']}.")
+        marked = [x for x in deals if x.get("applies")]
+        if marked:
+            parts.append("Price drops at your fulfillment center: " + "; ".join(
+                f"{_short(x['name'])} {money(x['your_price'])} ({x['label'][0].lower() + x['label'][1:]})" for x in marked[:3]) + ".")
+        bundles = [x for x in deals if x["kind"] == "bundle"]
+        if bundles:
+            b = bundles[0]
+            parts.append(f"Bundle: {' + '.join(b['names'])} together are {b['pct_off']}% off each (saves {money(b.get('saves_usd', 0))})"
+                         + (f", and {len(bundles) - 1} more bundles in the app" if len(bundles) > 1 else "") + ".")
+        return " ".join(parts) or "No promotions are running for you right now; every price in the app is already your member price."
     if intent == "subscription":
         it = next((i for i in (ctx.get("facts") or {}).get("catalog") or [] if C.PRODUCT_BY_SKU[i["sku"]]["consumable"]), None)
         if it:
@@ -464,7 +513,8 @@ def compose_fallback(intent: str, personal: bool, message: str, ctx: dict, shopp
             fc = C.FULFILLMENT_CENTERS[shopper["delivery"]["fulfillment_center"]]["name"]
             stock = (f"{it['on_hand_at_fc']} on hand at the {fc}" if it["on_hand_at_fc"] > 0
                      else f"out of stock at the {fc} - it would backorder")
-            txt = (f"{it['name']} is {money(it['unit_price'])} for you ({tier}, list {money(it['list_price'])}); {stock}"
+            txt = (f"{it['name']} is {money(it['unit_price'])} for you ({tier}, list {money(it['list_price'])}"
+                   + (f", including {' and '.join(x.lower() for x in it['deals'][:2])}" if it.get("deals") else "") + f"); {stock}"
                    + (f", and it's in aisle {it['aisle']} at {(shopper.get('home_store') or {}).get('name')}" if it.get("aisle") else "") + ".")
             pm = next((p for p in pms if p["sku"] == it["sku"]), None)
             if pm:
@@ -472,6 +522,9 @@ def compose_fallback(intent: str, personal: bool, message: str, ctx: dict, shopp
                         f"and save {money(pm['saving_usd'])} once Customer Care approves.")
             elif intent == "pricing":
                 txt += " Multi-buy: 3+ takes another 5% off, 6+ another 10%."
+            up = C.UPGRADES.get(it["sku"])
+            if up and intent == "pricing":
+                txt += f" Worth a look: {_short(C.PRODUCT_BY_SKU[up[0]]['name'])} - {up[1][0].lower() + up[1][1:]}."
             return txt + _limit_note(shopper, it)
         if pms and intent == "pricing":
             pm = pms[0]
@@ -548,8 +601,25 @@ def suggest_actions(intent: str, ctx: dict, shopper: dict | None, message: str) 
                                   "competitor_price_usd": pm["competitor_price_usd"]}})
         if items:
             acts.append({"label": f"View {_short(items[0]['name'])}", "screen": "product", "args": {"sku": items[0]["sku"]}})
+            up = C.UPGRADES.get(items[0]["sku"])
+            if up:
+                acts.append({"label": f"See {_short(C.PRODUCT_BY_SKU[up[0]]['name'])}", "screen": "product", "args": {"sku": up[0]}})
         else:
             acts.append({"label": "Open Cart", "screen": "cart"})
+    elif intent == "deals":
+        deals = d.get("deals") or []
+        items = facts.get("catalog") or []
+        if items and re.search(r"go(es)? (well )?with|pair|bundle", message.lower()):
+            for x, _ in C.PAIRS_WITH.get(items[0]["sku"], [])[:2]:
+                acts.append({"label": f"View {_short(C.PRODUCT_BY_SKU[x]['name'])}", "screen": "product", "args": {"sku": x}})
+            return acts + [{"label": "Open Cart", "screen": "cart"}]
+        top = next((x for x in deals if x.get("applies")), None)
+        if top:
+            acts.append({"label": f"View {_short(top['name'])}", "screen": "product", "args": {"sku": top["sku"]}})
+        b = next((x for x in deals if x["kind"] == "bundle"), None)
+        if b:
+            acts.append({"label": f"See the {b['label']}", "screen": "product", "args": {"sku": b["skus"][0]}})
+        acts.append({"label": "Open Cart", "screen": "cart"})
     elif intent == "rewards":
         acts.append({"label": "Open Cart", "screen": "cart"})
     elif intent == "subscription":
@@ -668,7 +738,7 @@ async def ask(shopper_id: str, message: str, session_id: str | None = None) -> d
                 await _append_chat(shopper_id, message, result)
                 return result
         ctx = await get_context(shopper, intent, personal, message)
-        if personal and intent in ("pricing", "availability", "subscription"):
+        if personal and intent in ("pricing", "availability", "subscription", "deals"):
             ctx = dict(ctx, facts=dict(ctx.get("facts") or {}, catalog=await _catalog_lookup(shopper_id, message)))
         memories = await _recall(shopper_id, message) if personal else []
         prompt = build_prompt(message, personal, ctx, shopper, memories)

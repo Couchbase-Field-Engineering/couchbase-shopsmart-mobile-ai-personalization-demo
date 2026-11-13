@@ -1,4 +1,4 @@
-import type { Catalog, ChatDoc, ContextDoc, OrderRequest, RecsDoc, Shopper, Store, SyncState } from '../types';
+import type { Catalog, ChatDoc, ContextDoc, OrderRequest, PricingDoc, RecsDoc, Shopper, Store, SyncState } from '../types';
 
 /**
  * The app's local database. Two implementations with the same contract:
@@ -16,7 +16,7 @@ export const SCOPE = 'retail';
 export const COLLECTIONS = ['shoppers', 'stores', 'recommendations', 'orders', 'assistant', 'context_cache', 'catalog'] as const;
 export type CollectionName = (typeof COLLECTIONS)[number];
 
-export const INTENTS = ['reorder', 'pricing', 'availability', 'delivery', 'returns', 'rewards', 'history', 'subscription', 'preferences', 'general'];
+export const INTENTS = ['reorder', 'pricing', 'availability', 'delivery', 'returns', 'rewards', 'history', 'subscription', 'preferences', 'deals', 'general'];
 
 export type Snapshot = {
   /** The signed-in shopper's profile (the Databricks row plus live state). */
@@ -28,11 +28,13 @@ export type Snapshot = {
   orders: OrderRequest[];
   chat: ChatDoc | null;
   catalog: Catalog | null;
+  /** Dynamic pricing rules for the shopper's fulfillment center: markdowns, hours, competitor caps, bundles, stock. */
+  pricing: PricingDoc | null;
   /** Context cache docs by their id (ctx::<shopper>::<intent> / ctx::<shopper>::guide_<intent>). */
   contexts: Record<string, ContextDoc>;
 };
 
-export const EMPTY: Snapshot = { shopper: null, store: null, recs: null, orders: [], chat: null, catalog: null, contexts: {} };
+export const EMPTY: Snapshot = { shopper: null, store: null, recs: null, orders: [], chat: null, catalog: null, pricing: null, contexts: {} };
 
 export type SyncSession = {
   token: string;
@@ -60,6 +62,7 @@ export const ids = {
   chat: (s: string) => `chat::${s}`,
   ctx: (shopperId: string, k: string) => `ctx::${shopperId}::${k}`,
   catalog: 'catalog::v1',
+  pricing: (fc: string) => `pricing::${fc}`,
 };
 
 export type Doc = Record<string, unknown> & { _id?: string };
@@ -88,6 +91,8 @@ export async function buildSnapshot(
     recs: (await get('recommendations', ids.recs(shopperId))) as unknown as RecsDoc | null,
     chat: (await get('assistant', ids.chat(shopperId))) as unknown as ChatDoc | null,
     catalog: (await get('catalog', ids.catalog)) as unknown as Catalog | null,
+    // Only this shopper's fulfillment-center channel replicates, so there is one rules document to read.
+    pricing: shopper ? ((await get('catalog', ids.pricing(shopper.delivery.fulfillment_center))) as unknown as PricingDoc | null) : null,
     contexts,
     orders: [...orders].sort((a, b) => (a.created_at < b.created_at ? 1 : -1)),
   };

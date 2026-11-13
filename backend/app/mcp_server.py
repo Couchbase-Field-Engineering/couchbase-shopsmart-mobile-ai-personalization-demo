@@ -49,34 +49,38 @@ async def get_shopper_context(shopper_id: str) -> dict:
 
 @mcp.tool()
 async def get_recommendations(shopper_id: str) -> dict:
-    """The next-basket model's smart cart for a shopper (what is about to run out), priced at their member tier with on-hand units at their fulfillment center, plus 'for you' picks and price-match candidates."""
+    """The next-basket model's smart cart for a shopper (what is about to run out), priced for them with on-hand units at their fulfillment center, plus 'for you' picks, price-match candidates, their personal offers from loyalty data and the deals active right now (overstock markdowns, automatic competitor matches, the promotion for this hour, bundles)."""
     return await _run(actions.get_recommendations, shopper_id=shopper_id)
 
 
 @mcp.tool()
 async def search_catalog(shopper_id: str, query: str = "", category: str = "") -> dict:
-    """Search the product catalog for a shopper: member unit price, list price, fulfillment-center on-hand units, aisle at their home store, purchase limit and whether they buy it regularly. category is one of pantry, household, personal, baby, pets, kitchen, electronics, toys, outdoor."""
+    """Search the product catalog for a shopper: their unit price with the deals behind it, list price, fulfillment-center on-hand units, aisle at their home store, purchase limit and whether they buy it regularly. category is one of pantry, household, personal, baby, pets, kitchen, electronics, toys, outdoor."""
     return await _run(actions.search_catalog, shopper_id=shopper_id, query=query, category=category)
 
 
 @mcp.tool()
 async def quote_cart(shopper_id: str, lines: list, delivery_option: str = "") -> dict:
-    """Price a cart of lines [{sku, qty}] for a shopper: member pricing, multi-buy savings, delivery fee, tax, store credit applied, points earned, purchase-limit check and any short stock."""
+    """Price a cart of lines [{sku, qty}] for a shopper: member pricing, multi-buy savings, dynamic promotions, bundles and personal offers (each line lists its adjustments), delivery fee, tax, store credit applied, points earned, purchase-limit check and any short stock."""
     return await _run(actions.quote_cart, shopper_id=shopper_id, lines=lines, delivery_option=delivery_option)
 
 
 @mcp.tool()
-async def place_order(shopper_id: str, lines: list, delivery_option: str = "", notes: str = "") -> dict:
-    """Place an order of lines [{sku, qty}] for a shopper at member pricing. Allocates fulfillment-center inventory (backorders the rest), applies store credit and awards points. Fails with reason_code purchase_limit when a limited item exceeds its per-household limit."""
-    return await _run(actions.place_order, shopper_id=shopper_id, lines=lines, delivery_option=delivery_option, notes=notes)
+async def place_order(shopper_id: str, lines: list, delivery_option: str = "", notes: str = "", pricing_version: str = "",
+                      priced_hour: int | None = None, sources: dict | None = None) -> dict:
+    """Place an order of lines [{sku, qty}] for a shopper at their price (member tier, promotions, bundles, offers). pricing_version and priced_hour lock the price to the rules the shopper's phone priced the cart with; sources maps sku to how it got into the cart (smart_cart, pick, cross_sell, upsell, bundle, deal, browse). Allocates fulfillment-center inventory (backorders the rest), applies store credit and awards points. Fails with reason_code purchase_limit when a limited item exceeds its per-household limit."""
+    return await _run(actions.place_order, shopper_id=shopper_id, lines=lines, delivery_option=delivery_option, notes=notes,
+                      pricing_version=pricing_version, priced_hour=priced_hour, sources=sources)
 
 
 @mcp.tool()
 async def request_price_match(shopper_id: str, lines: list, sku: str, competitor: str, competitor_price_usd: float,
-                              delivery_option: str = "", notes: str = "") -> dict:
+                              delivery_option: str = "", notes: str = "", pricing_version: str = "",
+                              priced_hour: int | None = None, sources: dict | None = None) -> dict:
     """Place an order of lines [{sku, qty}] with one item (sku) matched to a competitor's lower price. REQUIRES HUMAN APPROVAL (Customer Care). Competitor must be one ShopSmart matches; the matched price has a floor and a per-order cap."""
     return await _run(actions.request_price_match, shopper_id=shopper_id, lines=lines, sku=sku, competitor=competitor,
-                      competitor_price_usd=competitor_price_usd, delivery_option=delivery_option, notes=notes)
+                      competitor_price_usd=competitor_price_usd, delivery_option=delivery_option, notes=notes,
+                      pricing_version=pricing_version, priced_hour=priced_hour, sources=sources)
 
 
 @mcp.tool()

@@ -33,7 +33,7 @@ def stack(tmp_path_factory):
     dump = tmp_path_factory.mktemp("dump")
     subprocess.run([sys.executable, os.path.join(ROOT, "databricks", "generate_mock_dump.py"), "--export-date",
                     "2026-11-13", "--target-mb", "2", "--out", str(dump)], check=True, capture_output=True)
-    env = {**os.environ, "STORE_DRIVER": "memory", "DUMP_DIR": str(dump), "AOM_URL": AOM, "AOM_AGENT_API_KEY": "",
+    env = {**os.environ, "DEMO_HOUR": "9", "STORE_DRIVER": "memory", "DUMP_DIR": str(dump), "AOM_URL": AOM, "AOM_AGENT_API_KEY": "",
            "AOM_ADMIN_PASSWORD": "Retail-Demo-2026", "AOM_AUTO_REGISTER": "true", "KB_PROFILE_LIMIT": "10",
            "AOM_MCP_PUBLIC_URL": f"{API}/shopsmart/mcp", "SG_ADMIN_URL": "", "REQUEST_POLL_SECONDS": "0.3",
            "FAKE_MCP_URL": f"{API}/shopsmart/mcp", "FAKE_FRESH_AOM": "1"}

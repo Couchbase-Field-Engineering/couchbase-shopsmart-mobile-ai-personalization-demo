@@ -35,6 +35,8 @@ PRODUCTS = [
     # pantry & grocery
     {"sku": "SS-110245", "name": "Morning Ridge Medium Roast Coffee Pods, 72-count", "category": "pantry", "uom": "box",
      "list_price": 34.99, "pack": "72 pods", "tags": ["coffee", "pods", "breakfast"], "consumable": True},
+    {"sku": "SS-110260", "name": "Morning Ridge Medium Roast Coffee Pods, 120-count value box", "category": "pantry", "uom": "box",
+     "list_price": 52.99, "pack": "120 pods", "tags": ["coffee", "pods", "breakfast", "value size"], "consumable": True},
     {"sku": "SS-110388", "name": "Golden Field Rolled Oats, 42 oz, 2-pack", "category": "pantry", "uom": "pack",
      "list_price": 9.49, "pack": "2 canisters", "tags": ["breakfast", "oatmeal"], "consumable": True},
     {"sku": "SS-110512", "name": "Casa Verde Extra Virgin Olive Oil, 1 L", "category": "pantry", "uom": "bottle",
@@ -76,6 +78,8 @@ PRODUCTS = [
     # baby
     {"sku": "SS-440129", "name": "Snugglebug Diapers, size 4, 150-count", "category": "baby", "uom": "box",
      "list_price": 44.99, "pack": "150 diapers", "tags": ["diapers", "toddler"], "consumable": True},
+    {"sku": "SS-440145", "name": "Snugglebug Diapers, size 4, 222-count value box", "category": "baby", "uom": "box",
+     "list_price": 61.99, "pack": "222 diapers", "tags": ["diapers", "toddler", "value size"], "consumable": True},
     {"sku": "SS-440263", "name": "Snugglebug Sensitive Baby Wipes, 720-count", "category": "baby", "uom": "case",
      "list_price": 19.99, "pack": "9 packs of 80", "tags": ["wipes", "unscented"], "consumable": True},
     {"sku": "SS-440377", "name": "First Steps Toddler Formula, 30 oz", "category": "baby", "uom": "can",
@@ -85,6 +89,8 @@ PRODUCTS = [
     # pets
     {"sku": "SS-550118", "name": "Trailhound Adult Dog Food, chicken & rice, 30 lb", "category": "pets", "uom": "bag",
      "list_price": 46.99, "pack": "30 lb", "tags": ["dog", "food"], "consumable": True},
+    {"sku": "SS-550133", "name": "Trailhound Adult Dog Food, chicken & rice, 44 lb value bag", "category": "pets", "uom": "bag",
+     "list_price": 62.99, "pack": "44 lb", "tags": ["dog", "food", "value size"], "consumable": True},
     {"sku": "SS-550246", "name": "Whiskerwell Indoor Cat Food, salmon, 16 lb", "category": "pets", "uom": "bag",
      "list_price": 31.99, "pack": "16 lb", "tags": ["cat", "food"], "consumable": True},
     {"sku": "SS-550359", "name": "FreshStep Clumping Cat Litter, unscented, 40 lb", "category": "pets", "uom": "box",
@@ -98,6 +104,8 @@ PRODUCTS = [
      "list_price": 279.99, "pack": "1 mixer", "tags": ["baking", "appliance", "mixer"], "consumable": False},
     {"sku": "SS-660237", "name": "CrispWave 6 qt Air Fryer", "category": "kitchen", "uom": "each",
      "list_price": 119.99, "pack": "1 air fryer", "tags": ["appliance", "cooking"], "consumable": False},
+    {"sku": "SS-660250", "name": "CrispWave 8 qt Dual-Basket Air Fryer", "category": "kitchen", "uom": "each",
+     "list_price": 159.99, "pack": "1 air fryer", "tags": ["appliance", "cooking", "premium"], "consumable": False},
     {"sku": "SS-660341", "name": "Morning Ridge Single-Serve Coffee Maker", "category": "kitchen", "uom": "each",
      "list_price": 89.99, "pack": "1 brewer", "tags": ["coffee", "appliance", "pods"], "consumable": False},
     {"sku": "SS-660468", "name": "Forge & Field 10-piece Nonstick Cookware Set", "category": "kitchen", "uom": "set",
@@ -109,6 +117,8 @@ PRODUCTS = [
     # electronics
     {"sku": "SS-770114", "name": "Aria Wireless Earbuds with noise cancelling", "category": "electronics", "uom": "each",
      "list_price": 129.99, "pack": "1 pair", "tags": ["audio", "headphones", "commute"], "consumable": False},
+    {"sku": "SS-770128", "name": "Aria Pro Wireless Earbuds with spatial audio", "category": "electronics", "uom": "each",
+     "list_price": 179.99, "pack": "1 pair", "tags": ["audio", "headphones", "commute", "premium"], "consumable": False},
     {"sku": "SS-770229", "name": "Nova X Handheld Game Console", "category": "electronics", "uom": "each",
      "list_price": 349.99, "pack": "1 console", "tags": ["gaming", "console"], "consumable": False, "limit_per_household": 1},
     {"sku": "SS-770336", "name": "Lumen 10 in Tablet, 128 GB", "category": "electronics", "uom": "each",
@@ -135,6 +145,93 @@ PRODUCTS = [
      "list_price": 159.99, "pack": "1 tent", "tags": ["camping", "hiking"], "consumable": False},
 ]
 PRODUCT_BY_SKU = {p["sku"]: p for p in PRODUCTS}
+
+# --------------------------------------------------------------------------
+# Merchandising: what goes with what, what the step-up is, and which items
+# sell as a bundle. In production these come out of market-basket analysis in
+# Databricks (the export's `_pricing_signals.json` carries them); the copies
+# here are what the mock generator writes and what the engine falls back to.
+# --------------------------------------------------------------------------
+# Cross-sell: sku in the cart -> [(sku to suggest, why)]
+PAIRS_WITH = {
+    "SS-110245": [("SS-660341", "Brews the pods in your cart")],
+    "SS-110260": [("SS-660341", "Brews the pods in your cart")],
+    "SS-660341": [("SS-110245", "Pods for your new brewer")],
+    "SS-440129": [("SS-440263", "Most parents add wipes"), ("SS-111046", "Snack pouches for the same age")],
+    "SS-440145": [("SS-440263", "Most parents add wipes")],
+    "SS-440263": [("SS-440129", "Diapers usually run out with the wipes")],
+    "SS-550118": [("SS-550472", "Dental chews, bought with this food 6 times in 10"), ("SS-550590", "Bed for the same dog")],
+    "SS-550133": [("SS-550472", "Dental chews, bought with this food 6 times in 10")],
+    "SS-550246": [("SS-550359", "Litter is bought with this food")],
+    "SS-550359": [("SS-550246", "Food is bought with this litter")],
+    "SS-660102": [("SS-660573", "Store what you bake"), ("SS-110388", "Oats for the first batch")],
+    "SS-660237": [("SS-110512", "Olive oil for the air fryer"), ("SS-660573", "Containers for meal prep")],
+    "SS-660250": [("SS-110512", "Olive oil for the air fryer"), ("SS-660573", "Containers for meal prep")],
+    "SS-770229": [("SS-770447", "Charges the console and your phone"), ("SS-770114", "Earbuds for handheld play")],
+    "SS-770336": [("SS-770447", "Wireless charger for the tablet"), ("SS-770114", "Earbuds for streaming")],
+    "SS-880243": [("SS-110903", "Snacks for game night"), ("SS-110777", "Drinks for game night")],
+    "SS-990218": [("SS-990107", "Water bottle for the studio"), ("SS-990334", "Protein bars for after")],
+    "SS-990451": [("SS-990107", "Water bottle for the trail"), ("SS-330431", "Sunscreen for the trail")],
+    "SS-220579": [("SS-220455", "Dish soap for what the dishwasher can't take")],
+    "SS-110630": [("SS-110512", "Olive oil for the pasta")],
+    "SS-220391": [("SS-220788", "Wipes are bought with detergent")],
+    "SS-220642": [("SS-220134", "Paper towels are bought with trash bags")],
+}
+# Upsell: sku -> (the step-up, why it's worth it)
+UPGRADES = {
+    "SS-110245": ("SS-110260", "Value box: 44 cents a pod instead of 49"),
+    "SS-440129": ("SS-440145", "Value box: 28 cents a diaper instead of 30"),
+    "SS-550118": ("SS-550133", "Value bag: $1.43 a pound instead of $1.57"),
+    "SS-770114": ("SS-770128", "Pro model: spatial audio and 8 more hours of battery"),
+    "SS-660237": ("SS-660250", "Two baskets: cook a main and a side at once"),
+}
+# Bundles: every item in the cart together takes pct_off off each of them.
+BUNDLES = [
+    {"id": "coffee-starter", "name": "Coffee starter", "skus": ["SS-660341", "SS-110245"], "pct_off": 15,
+     "reason": "Brewer and pods are bought together by 7 in 10 new coffee shoppers"},
+    {"id": "baby-essentials", "name": "Baby essentials", "skus": ["SS-440129", "SS-440263"], "pct_off": 8,
+     "reason": "Diapers and wipes, the most common pair in baby baskets"},
+    {"id": "new-pup", "name": "New pup", "skus": ["SS-550118", "SS-550472", "SS-550590"], "pct_off": 12,
+     "reason": "Food, chews and a bed for a new dog"},
+    {"id": "game-night", "name": "Game night", "skus": ["SS-880243", "SS-110903", "SS-110777"], "pct_off": 10,
+     "reason": "Games, snacks and drinks for a night in"},
+    {"id": "meal-prep", "name": "Meal prep", "skus": ["SS-660237", "SS-660573", "SS-110512"], "pct_off": 10,
+     "reason": "Air fryer, containers and olive oil"},
+]
+
+# Dynamic pricing rules. Percentages are off list and add to the member
+# tier and multi-buy discounts, up to MAX_DISCOUNT_PCT.
+MAX_DISCOUNT_PCT = 40
+OVERSTOCK_TIERS = [(4.6, 15), (4.0, 10)]   # (on hand / normal stock level, pct off)
+LOW_STOCK_RATIO = 0.15                     # at or below this share of the normal level: no promotions
+DYNAMIC_BUNDLE_PCT = 12
+# A competitor price within this share of our list price is matched automatically;
+# a bigger gap is a price-match request that Customer Care approves.
+AUTO_MATCH_MIN_PCT_OF_LIST = 92
+# Promotions tied to the hours the business is quiet or busy (24h clock, end exclusive).
+TIME_WINDOWS = [
+    {"id": "morning-coffee", "label": "Morning coffee run", "start_hour": 6, "end_hour": 10, "pct_off": 10,
+     "tags": ["coffee", "breakfast"], "reason": "Quiet delivery hours: breakfast items are 10% off until 10 am"},
+    {"id": "afternoon-restock", "label": "Afternoon restock", "start_hour": 13, "end_hour": 16, "pct_off": 5,
+     "categories": ["household"], "reason": "Off-peak for our drivers: household essentials are 5% off from 1 to 4 pm"},
+    {"id": "skip-the-rush", "label": "Skip the rush", "start_hour": 17, "end_hour": 20, "pct_off": 5, "peak": True,
+     "requires_option": "Store pickup", "reason": "Peak delivery hours: 5% off everything when you pick up in store from 5 to 8 pm"},
+]
+# The competitor price feed (market-wide, not per shopper): sku -> (competitor, their price).
+MARKET_PRICES = {
+    "SS-770114": ("Northfield Supply", 122.99),
+    "SS-660468": ("Brightway Market", 139.99),
+    "SS-220268": ("Oakline Stores", 26.49),
+    "SS-990218": ("Northfield Supply", 26.99),   # too far below list to match automatically
+}
+# Demand the forecast expects to outrun supply: never promoted.
+HIGH_DEMAND = ["SS-770229"]
+
+
+def stock_level(sku: str) -> int:
+    """The normal on-hand level a fulfillment center carries for an item."""
+    return 60 if PRODUCT_BY_SKU[sku]["consumable"] else 14
+
 
 # What each kind of household goes through month to month: sku -> typical
 # monthly quantity. The generator derives replenishment from this, with noise.
@@ -286,13 +383,17 @@ def initial_inventory(fc: str) -> dict:
     SKUs are deliberately short so partial shipments and backorders show up."""
     out = {}
     for p in PRODUCTS:
-        base = 60 if p["consumable"] else 14
-        out[p["sku"]] = base + _h(fc, p["sku"]) % (base * 4)
+        base = stock_level(p["sku"])
+        out[p["sku"]] = base + _h(fc, p["sku"]) % (base * 3)
     # Hero shortages: the handheld console is tight everywhere, coffee pods are
     # nearly gone in the Northeast, dog food is out in the Hudson Valley.
     out["SS-770229"] = 2 + _h(fc, "short") % 3
+    out["SS-330431"] = 300   # sunscreen in November: overstocked everywhere
     if fc == "FC-NE":
         out["SS-110245"] = 1
+        out["SS-220134"] = 330   # a truckload of paper towels landed in the Northeast
+    if fc == "FC-SC":
+        out["SS-880121"] = 70    # building sets overstocked in Texas
     if fc == "FC-NY":
         out["SS-550118"] = 0
     return out
@@ -331,4 +432,7 @@ def public_catalog() -> dict:
         "price_match_floor_pct": PRICE_MATCH_FLOOR_PCT,
         "fulfillment_centers": {k: {"name": v["name"], "city": v["city"]} for k, v in FULFILLMENT_CENTERS.items()},
         "household_types": {k: v["name"] for k, v in HOUSEHOLD_TYPES.items()},
+        "pairs_with": {k: [{"sku": s, "reason": r} for s, r in v] for k, v in PAIRS_WITH.items()},
+        "upgrades": {k: {"sku": s, "reason": r} for k, (s, r) in UPGRADES.items()},
+        "max_discount_pct": MAX_DISCOUNT_PCT,
     }

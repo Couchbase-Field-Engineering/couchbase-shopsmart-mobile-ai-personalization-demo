@@ -11,6 +11,7 @@ offline, and re-rank themselves on the next sync after every order.
 from __future__ import annotations
 
 from . import catalog as C
+from . import pricing as P
 from .docs import days_since, days_until, now_iso, recs_id, shopper_channel, shopper_id_doc
 from .store import store
 
@@ -36,11 +37,19 @@ def _reason(sku: str, s: dict, sug: dict) -> str:
 
 
 async def compute_recommendations(s: dict) -> dict:
-    from .actions import get_inventory, wallet_view  # avoid import cycle
+    from .actions import get_inventory, shopper_offers, wallet_view  # avoid import cycle
 
     m = s["ml_scores"]
     inv, _ = await get_inventory(s["delivery"]["fulfillment_center"])
     tier = s["membership"]["tier"]
+    # Prices here are the rules engine's as of now; the phone re-prices from the same rules on every render.
+    pricing = await P.get(s["delivery"]["fulfillment_center"])
+    hour = P.hour_now(await P.get_signals())
+    offers = shopper_offers(s)
+
+    def price(sku, qty=1):
+        return P.quote(tier, {sku: qty}, pricing, hour, "", offers)[0]["unit_price"]
+
     prefs = s.get("preferences", {})
     favorite, avoid = set(prefs.get("favorite_categories", [])), set(prefs.get("avoid_categories", []))
     store_id = (s.get("home_store") or {}).get("store_id")
@@ -57,7 +66,7 @@ async def compute_recommendations(s: dict) -> dict:
         if not p or sku in recent or sku in subscribed or p["category"] in avoid:
             continue  # just bought it, already on Subscribe & Save, or hidden by the shopper
         qty = int(sug["qty"])
-        unit = C.member_price(sku, tier, qty)
+        unit = price(sku, qty)
         on_hand = inv["on_hand"].get(sku, 0)
         affinity = m.get(C.CATEGORIES[p["category"]]["affinity"], 0.5)
         score = float(sug.get("confidence", 0.5)) * (0.6 + 0.4 * affinity)
@@ -84,7 +93,7 @@ async def compute_recommendations(s: dict) -> dict:
         p = C.PRODUCT_BY_SKU.get(sku)
         if not p or p["category"] in avoid or sku in bought_30d or any(l["sku"] == sku for l in lines):
             continue
-        unit = C.member_price(sku, tier, 1)
+        unit = price(sku)
         affinity = m.get(C.CATEGORIES[p["category"]]["affinity"], 0.5)
         score = float(rec.get("confidence", 0.5)) * (0.6 + 0.4 * affinity) * (1.25 if p["category"] in favorite else 1.0)
         for_you.append({"sku": sku, "name": p["name"], "category": p["category"], "category_name": C.CATEGORIES[p["category"]]["name"],
@@ -101,7 +110,7 @@ async def compute_recommendations(s: dict) -> dict:
         p = C.PRODUCT_BY_SKU.get(w["sku"])
         if not p or w.get("competitor") not in C.COMPETITORS or w["sku"] in bought_30d:
             continue
-        unit = C.member_price(w["sku"], tier, 1)
+        unit = price(w["sku"])
         if float(w["competitor_price_usd"]) < unit:
             price_matches.append({"sku": w["sku"], "name": p["name"], "competitor": w["competitor"],
                                   "competitor_price_usd": float(w["competitor_price_usd"]), "member_price_usd": unit,
@@ -111,14 +120,19 @@ async def compute_recommendations(s: dict) -> dict:
     subtotal = round(sum(l["line_total"] for l in selected), 2)
     return {
         "lines": lines, "for_you": for_you[:6], "price_matches": price_matches,
+        # Tailored promotions from loyalty data. Offers on something the shopper has hidden are dropped.
+        "offers": [o for o in offers if o.get("category") not in avoid
+                   and (not o.get("sku") or C.PRODUCT_BY_SKU.get(o["sku"], {}).get("category") not in avoid)],
+        "pricing_version": pricing["version"],
         "suggested_total_usd": subtotal,
         "suggested_savings_usd": round(sum((l["list_price"] - l["unit_price"]) * l["qty"] for l in selected), 2),
         "wallet": wallet_view(s),
-        "insights": insights(s, lines, price_matches),
+        "insights": insights(s, lines, price_matches, offers, P.active_deals(pricing, hour)),
     }
 
 
-def insights(s: dict, lines: list[dict], price_matches: list[dict]) -> list[str]:
+def insights(s: dict, lines: list[dict], price_matches: list[dict], offers: list | None = None,
+             deals: list | None = None) -> list[str]:
     """The 'for you today' notes on the Home screen."""
     pts = []
     urgent = [l for l in lines if l.get("days_to_runout") is not None and l["days_to_runout"] <= 7]
@@ -133,8 +147,15 @@ def insights(s: dict, lines: list[dict], price_matches: list[dict]) -> list[str]
         pm = price_matches[0]
         pts.append(f"{pm['competitor']} has {_short(pm['name'])} for ${pm['competitor_price_usd']:,.2f} - ask for a price match and save "
                    f"${pm['saving_usd']:,.2f}")
+    if offers:
+        o = offers[0]
+        pts.append(f"Offer for you: {o['title']}. {o['reason']}")
+    mine = {l["sku"] for l in lines}
+    deal = next((d for d in deals or [] if d["kind"] == "overstock" and d["sku"] in mine), None)
+    if deal and len(pts) < 4:
+        pts.append(f"{_short(deal['name'])} is {deal['pct_off']}% off today: overstock markdown")
     w = s["wallet"]
-    if float(w.get("store_credit_usd", 0)) > 0:
+    if float(w.get("store_credit_usd", 0)) > 0 and len(pts) < 4:
         pts.append(f"${float(w['store_credit_usd']):,.2f} store credit comes off your next order automatically")
     last = s["order_history"][0] if s.get("order_history") else None
     if last and len(pts) < 4:

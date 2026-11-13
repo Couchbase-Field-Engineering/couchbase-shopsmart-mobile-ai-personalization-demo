@@ -24,6 +24,11 @@ DUMP_DIR = os.getenv("DUMP_DIR", os.path.join(os.path.dirname(__file__), "..", "
 DUMP_POLL_SECONDS = int(os.getenv("DUMP_POLL_SECONDS", "600"))
 # Memory driver only: keep the first N shoppers of the export (the demo personas are always its first rows).
 MEMORY_SHOPPER_LIMIT = int(os.getenv("MEMORY_SHOPPER_LIMIT", "1500"))
+# Dynamic pricing: the rules are rebuilt on every inventory change and on this timer.
+PRICING_REFRESH_SECONDS = int(os.getenv("PRICING_REFRESH_SECONDS", "60"))
+# Time-window promotions use the wall clock in this zone, unless DEMO_HOUR pins the hour (0-23).
+PRICING_TZ = os.getenv("PRICING_TZ", "America/New_York")
+DEMO_HOUR = int(os.environ["DEMO_HOUR"]) if os.getenv("DEMO_HOUR", "").strip() else None
 # Recommendations are pre-built for shoppers who opened the app within this many
 # days (and for the demo personas); everyone else gets theirs at sign-in.
 RECS_WINDOW_DAYS = int(os.getenv("RECS_WINDOW_DAYS", "1"))

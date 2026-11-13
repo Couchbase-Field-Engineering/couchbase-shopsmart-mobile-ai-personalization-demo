@@ -113,7 +113,10 @@ ml_schema = ("struct<model_version:string,scored_at:string,pantry_affinity:doubl
              "electronics_affinity:double,toys_affinity:double,outdoor_affinity:double,"
              "churn_risk:double,predicted_basket_usd:double,days_to_runout:map<string,int>,"
              "replenish_lines:array<struct<sku:string,qty:int,confidence:double,reason:string>>,"
-             "recommended:array<struct<sku:string,confidence:double,reason:string>>,segment:string,next_best_offer:string>")
+             "recommended:array<struct<sku:string,confidence:double,reason:string>>,segment:string,next_best_offer:string,"
+             # Personal offers the propensity model issues from purchase history and loyalty data.
+             "offers:array<struct<offer_id:string,kind:string,category:string,sku:string,pct_off:int,points:int,"
+             "min_subtotal_usd:double,title:string,driver:string,reason:string,expires:string,once:boolean>>>")
 
 ml = F.from_json("ml_scores_json", ml_schema)
 out = scored.select(
@@ -163,6 +166,41 @@ manifest = {
 }
 dbutils.fs.put(f"{path}/_manifest.json", json.dumps(manifest, indent=2), overwrite=True)
 print(json.dumps(manifest, indent=2))
+
+# COMMAND ----------
+# MAGIC %md
+# MAGIC ## 5. Pricing signals for the merchandising rules engine (`_pricing_signals.json`)
+# MAGIC One small file beside the shopper rows. The app's pricing engine combines it with live inventory
+# MAGIC in Couchbase to build the rules every phone prices with, so none of this is queried per request:
+# MAGIC * `market_prices` - yesterday's competitor price per SKU (price-intelligence feed)
+# MAGIC * `high_demand` - SKUs the demand forecast expects to outrun supply (never promoted)
+# MAGIC * `time_windows` - promotions tied to quiet and peak delivery hours (from the order-volume-by-hour table)
+# MAGIC * `bundles`, `pairs_with`, `upgrades` - market-basket analysis: what sells together, and each item's step-up
+
+# COMMAND ----------
+
+def rows(sql):
+    return [r.asDict(recursive=True) for r in spark.sql(sql).collect()]
+
+signals = {
+    "source": f"databricks export {export_date}",
+    "export_date": export_date,
+    "market_prices": {r["sku"]: {"competitor": r["competitor"], "price_usd": float(r["price_usd"])}
+                      for r in rows(f"SELECT sku, competitor, price_usd FROM {CATALOG}.pricing.competitor_prices_latest")},
+    "high_demand": [r["sku"] for r in rows(f"SELECT sku FROM {CATALOG}.ml.demand_forecast_daily "
+                                           f"WHERE forecast_date = '{export_date}' AND demand_to_supply_ratio > 1.0")],
+    "time_windows": rows(f"SELECT id, label, start_hour, end_hour, pct_off, tags, categories, requires_option, peak, reason "
+                         f"FROM {CATALOG}.pricing.time_window_promotions WHERE active"),
+    "bundles": rows(f"SELECT id, name, skus, pct_off, reason FROM {CATALOG}.ml.basket_bundles WHERE lift >= 2.0"),
+    "pairs_with": {r["sku"]: r["pairs"] for r in rows(
+        f"SELECT sku, collect_list(named_struct('sku', other_sku, 'reason', reason)) AS pairs "
+        f"FROM {CATALOG}.ml.basket_affinity WHERE rank <= 2 GROUP BY sku")},
+    "upgrades": {r["sku"]: {"sku": r["upgrade_sku"], "reason": r["reason"]}
+                 for r in rows(f"SELECT sku, upgrade_sku, reason FROM {CATALOG}.ml.product_step_ups")},
+}
+# Spark's json writer drops null struct fields; do the same so optional keys are simply absent.
+signals["time_windows"] = [{k: v for k, v in w.items() if v is not None} for w in signals["time_windows"]]
+dbutils.fs.put(f"{path}/_pricing_signals.json", json.dumps(signals, indent=2), overwrite=True)
 
 # COMMAND ----------
 # MAGIC %md

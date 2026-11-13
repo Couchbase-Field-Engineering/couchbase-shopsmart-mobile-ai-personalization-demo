@@ -1,7 +1,10 @@
 """Shopping actions - the business logic behind every MCP tool.
 
 These functions are what actually changes state (orders, inventory, store
-credit, subscriptions, returns, preferences). They are only ever reached
+credit, subscriptions, returns, preferences). Prices come from the dynamic
+pricing engine (`pricing.py`): member tier, multi-buy, inventory- and
+hour-driven promotions, competitor matches, bundles and the shopper's own
+offers. They are only ever reached
 through `tool_gateway`, which routes them through the Couchbase Agent
 Operations Manager when it is configured (RBAC, approvals, tracing, audit) and
 calls them in-process otherwise. Every mutation bumps the shopper's `rev`,
@@ -20,6 +23,8 @@ import hashlib
 import uuid
 
 from . import catalog as C
+from . import metrics
+from . import pricing as P
 from .docs import days_since, inventory_id, money, now_iso, shopper_id_doc, today
 from .store import store
 
@@ -88,32 +93,40 @@ async def allocate_inventory(fc: str, wants: dict[str, int]) -> dict[str, int]:
     raise ToolError("Inventory is busy - please try again")
 
 
-def _line(s: dict, sku: str, qty: int, matched_unit: float | None = None) -> dict:
-    p = C.PRODUCT_BY_SKU.get(sku)
-    if not p:
-        raise ToolError(f"Unknown item '{sku}'")
-    qty = int(qty)
-    if qty < 1 or qty > 24:
-        raise ToolError(f"Quantity for {short(p['name'])} must be between 1 and 24")
-    unit = C.member_price(sku, s["membership"]["tier"], qty)
-    line = {"sku": sku, "name": p["name"], "category": p["category"], "uom": p["uom"], "qty": qty,
-            "list_price": p["list_price"], "unit_price": unit, "line_total": round(unit * qty, 2),
-            "savings": round((p["list_price"] - unit) * qty, 2)}
-    if matched_unit is not None and matched_unit < unit:
-        line.update(unit_price=matched_unit, line_total=round(matched_unit * qty, 2), member_unit_price=unit,
-                    savings=round((p["list_price"] - matched_unit) * qty, 2), price_matched=True)
-    return line
+def shopper_offers(s: dict) -> list[dict]:
+    """The personal offers the nightly model issued that are still usable:
+    not expired, and not already redeemed if they are one-time."""
+    used = set(s.get("redeemed_offers", []))
+    return [o for o in s["ml_scores"].get("offers", [])
+            if o.get("offer_id") not in used and (not o.get("expires") or o["expires"] >= today().isoformat())]
 
 
-def _normalize_lines(s: dict, lines, match: dict | None = None) -> list[dict]:
+def _merge(lines) -> dict[str, int]:
     if not isinstance(lines, list) or not lines:
         raise ToolError("An order needs at least one item")
-    merged: dict[str, int] = {}
+    cart: dict[str, int] = {}
     for ln in lines:
         if not isinstance(ln, dict) or not ln.get("sku"):
             raise ToolError("Each line needs a sku and qty")
-        merged[ln["sku"]] = merged.get(ln["sku"], 0) + int(ln.get("qty") or 1)
-    return [_line(s, sku, qty, (match or {}).get(sku)) for sku, qty in merged.items()]
+        p = C.PRODUCT_BY_SKU.get(ln["sku"])
+        if not p:
+            raise ToolError(f"Unknown item '{ln['sku']}'")
+        cart[ln["sku"]] = cart.get(ln["sku"], 0) + int(ln.get("qty") or 1)
+    for sku, qty in cart.items():
+        if qty < 1 or qty > 24:
+            raise ToolError(f"Quantity for {short(C.PRODUCT_BY_SKU[sku]['name'])} must be between 1 and 24")
+    return cart
+
+
+async def _price(s: dict, lines, option: str = "", match: dict | None = None, pricing_version: str = "",
+                 priced_hour: int | None = None) -> tuple[list[dict], dict, int]:
+    """Price lines for a shopper with the current rules - or, when a phone
+    names the rule version and hour it priced the cart at, with exactly
+    those (the price lock that makes an offline cart's total stick)."""
+    cart = _merge(lines)
+    pricing = await P.get(s["delivery"]["fulfillment_center"], pricing_version or None)
+    hour = int(priced_hour) % 24 if priced_hour is not None and str(priced_hour) != "" else P.hour_now(await P.get_signals())
+    return P.quote(s["membership"]["tier"], cart, pricing, hour, option, shopper_offers(s), match), pricing, hour
 
 
 def _option(s: dict, delivery_option: str) -> str:
@@ -124,16 +137,28 @@ def _option(s: dict, delivery_option: str) -> str:
 
 
 def _totals(s: dict, lines: list[dict], option: str) -> dict:
-    """Same arithmetic the phone runs offline (mobile/app/cart.tsx)."""
+    """Same arithmetic the phone runs offline (mobile/src/pricing.ts)."""
     tier = C.TIER_BY_CODE[s["membership"]["tier"]]
     subtotal = round(sum(l["line_total"] for l in lines), 2)
     fee = 0.0 if option == C.PICKUP_OPTION or subtotal >= tier["free_delivery_min_usd"] else C.DELIVERY_FEE_USD
     tax = round(subtotal * C.TAX_RATE, 2)
     total = round(subtotal + fee + tax, 2)
     credit = round(min(float(s["wallet"].get("store_credit_usd", 0)), total), 2)
+    bonus, bonus_offers = P.bonus_points(shopper_offers(s), subtotal)
+    applied: dict[str, float] = {}
+    for l in lines:
+        for a in l.get("adjustments", []):
+            if a["rule"] in ("overstock", "time", "offer", "bundle") and "pct" in a:
+                applied[a["label"]] = round(applied.get(a["label"], 0) + l["list_price"] * a["pct"] / 100.0 * l["qty"], 2)
+            elif a["rule"] == "competitor":
+                applied[a["label"]] = applied.get(a["label"], 0)
     return {"subtotal_usd": subtotal, "delivery_fee_usd": fee, "tax_usd": tax, "total_usd": total,
             "savings_usd": round(sum(l["savings"] for l in lines), 2), "store_credit_applied_usd": credit,
-            "amount_due_usd": round(total - credit, 2), "points_earned": int(subtotal) * tier["points_per_usd"]}
+            "amount_due_usd": round(total - credit, 2),
+            "points_earned": int(subtotal) * tier["points_per_usd"] + bonus, "bonus_points": bonus,
+            "promotions": [{"label": k, "saved_usd": v} for k, v in applied.items()],
+            "offers_applied": sorted({a["id"] for l in lines for a in l.get("adjustments", []) if a["rule"] == "offer"} | set(bonus_offers)),
+            "bundles_applied": sorted({a["id"] for l in lines for a in l.get("adjustments", []) if a["rule"] == "bundle"})}
 
 
 def wallet_view(s: dict) -> dict:
@@ -192,11 +217,16 @@ async def get_recommendations(shopper_id: str) -> dict:
     recs = await personalization.compute_recommendations(s)
     lines = [l for l in recs["lines"] if l["selected"]]
     option = _option(s, "")
-    tot = _totals(s, [{**l, "savings": round((l["list_price"] - l["unit_price"]) * l["qty"], 2)} for l in lines], option) if lines else {}
+    tot = {}
+    if lines:
+        priced, _, _ = await _price(s, [{"sku": l["sku"], "qty": l["qty"]} for l in lines], option)
+        tot = _totals(s, priced, option)
     return {"shopper_id": shopper_id, "tier": s["membership"]["tier"], "tier_name": s["membership"]["tier_name"],
             "fulfillment_center": s["delivery"]["fulfillment_center"], "delivery_option": option,
             "lines": lines, "totals": tot, "wallet": wallet_view(s), "for_you": recs["for_you"],
-            "price_matches": recs["price_matches"], "model_version": s["ml_scores"].get("model_version")}
+            "price_matches": recs["price_matches"], "offers": recs["offers"],
+            "deals": (await get_deals(shopper_id))["deals"],
+            "model_version": s["ml_scores"].get("model_version")}
 
 
 async def search_catalog(shopper_id: str, query: str = "", category: str = "") -> dict:
@@ -204,6 +234,9 @@ async def search_catalog(shopper_id: str, query: str = "", category: str = "") -
     inv, _ = await get_inventory(s["delivery"]["fulfillment_center"])
     store_id = (s.get("home_store") or {}).get("store_id")
     q = (query or "").lower().split()
+    pricing = await P.get(s["delivery"]["fulfillment_center"])
+    hour = P.hour_now(await P.get_signals())
+    offers = shopper_offers(s)
     out = []
     for p in C.PRODUCTS:
         if category and p["category"] != category:
@@ -213,34 +246,64 @@ async def search_catalog(shopper_id: str, query: str = "", category: str = "") -
         if q and not score:
             continue
         rep = s.get("replenishment", {}).get(p["sku"])
-        out.append({**_line(s, p["sku"], 1), "on_hand_at_fc": inv["on_hand"].get(p["sku"], 0),
+        line = P.quote(s["membership"]["tier"], {p["sku"]: 1}, pricing, hour, "", offers)[0]
+        out.append({**line, "deals": [a["label"] for a in line["adjustments"] if a["rule"] not in ("tier", "multi_buy")],
+                    "on_hand_at_fc": inv["on_hand"].get(p["sku"], 0),
                     "aisle": C.aisle_for(store_id, p["sku"]) if store_id in C.STORES else None,
                     "buys_regularly": bool(rep), "avg_monthly_qty": (rep or {}).get("avg_monthly_qty"),
                     "limit_per_household": p.get("limit_per_household"), "score": score + (0.5 if rep else 0)})
-    out.sort(key=lambda r: (-r["score"], r["name"]))
+    # On a tie the everyday item comes before its step-up (the value box, the pro model).
+    step_ups = {up for up, _ in C.UPGRADES.values()}
+    out.sort(key=lambda r: (-r["score"], r["sku"] in step_ups, r["name"]))
     return {"shopper_id": shopper_id, "items": out[:15]}
+
+
+async def get_deals(shopper_id: str) -> dict:
+    """(Not a tool of its own: `get_recommendations` returns it.) What is moving prices for this shopper right now: their personal
+    offers, the dynamic price rules at their fulfillment center (overstock
+    markdowns, competitor matches, the promotion for this hour) and bundles."""
+    s = await load_shopper(shopper_id)
+    pricing = await P.get(s["delivery"]["fulfillment_center"])
+    hour = P.hour_now(await P.get_signals())
+    offers = shopper_offers(s)
+    tier = s["membership"]["tier"]
+    deals = P.active_deals(pricing, hour)
+    for d in deals:
+        if d.get("sku"):
+            d["your_price"] = P.unit_price(tier, d["sku"], pricing, hour, offers)
+            d["list_price"] = C.PRODUCT_BY_SKU[d["sku"]]["list_price"]
+            # A competitor match only matters to a shopper whose own price was above it.
+            d["applies"] = d["kind"] == "overstock" or d["your_price"] == d.get("price_cap")
+        elif d["kind"] == "bundle":
+            priced = P.quote(tier, {x: 1 for x in d["skus"]}, pricing, hour, "", offers)
+            d["bundle_price"] = round(sum(l["line_total"] for l in priced), 2)
+            d["saves_usd"] = round(sum(C.PRODUCT_BY_SKU[x]["list_price"] * d["pct_off"] / 100.0 for x in d["skus"]), 2)
+    return {"shopper_id": shopper_id, "fulfillment_center": pricing["fc"], "hour": hour, "pricing_version": pricing["version"],
+            "offers": offers, "deals": deals, "tier_name": s["membership"]["tier_name"]}
 
 
 async def quote_cart(shopper_id: str, lines: list, delivery_option: str = "") -> dict:
     s = await load_shopper(shopper_id)
-    ls = _normalize_lines(s, lines)
     option = _option(s, delivery_option)
+    ls, pricing, hour = await _price(s, lines, option)
     inv, _ = await get_inventory(s["delivery"]["fulfillment_center"])
     short_lines = [{"sku": l["sku"], "name": l["name"], "requested": l["qty"], "on_hand": inv["on_hand"].get(l["sku"], 0)}
                    for l in ls if inv["on_hand"].get(l["sku"], 0) < l["qty"]]
     return {"shopper_id": shopper_id, "lines": ls, "totals": _totals(s, ls, option), "delivery_option": option,
             "wallet": wallet_view(s), "short": short_lines, "purchase_limits": limit_check(s, ls),
-            "fulfillment_center": s["delivery"]["fulfillment_center"]}
+            "fulfillment_center": s["delivery"]["fulfillment_center"], "pricing_version": pricing["version"], "priced_hour": hour}
 
 
 # --------------------------------------------------------------------------
 # mutating tools
 # --------------------------------------------------------------------------
-async def place_order(shopper_id: str, lines: list, delivery_option: str = "", notes: str = "",
-                      _match: dict | None = None) -> dict:
+async def place_order(shopper_id: str, lines: list, delivery_option: str = "", notes: str = "", pricing_version: str = "",
+                      priced_hour: int | None = None, sources: dict | None = None, _match: dict | None = None) -> dict:
     s = await load_shopper(shopper_id)
-    ls = _normalize_lines(s, lines, _match)
     option = _option(s, delivery_option)
+    ls, pricing, hour = await _price(s, lines, option, _match, pricing_version, priced_hour)
+    for l in ls:
+        l["source"] = (sources or {}).get(l["sku"], "browse")
     over = limit_check(s, ls)
     if over:
         o = over[0]
@@ -264,7 +327,9 @@ async def place_order(shopper_id: str, lines: list, delivery_option: str = "", n
     order = {"order_id": order_id, "date": today().isoformat(), "placed_at": now_iso(), "status": status,
              "channel": "app", "delivery_option": option, "eta": _eta(option), "fulfillment_center": fc,
              "pickup_store": store_name if option == C.PICKUP_OPTION else None, "notes": (notes or "").strip()[:300],
-             "lines": ls, "line_count": len(ls), **tot, "backordered": backordered, "price_match": bool(_match)}
+             "lines": ls, "line_count": len(ls), **tot, "backordered": backordered, "price_match": bool(_match),
+             "pricing_version": pricing["version"], "priced_hour": hour,
+             "price_locked": bool(pricing_version) and pricing["version"] == pricing_version}
     # live state on the shopper: wallet, history, replenishment
     w = s["wallet"]
     w["store_credit_usd"] = round(float(w.get("store_credit_usd", 0)) - tot["store_credit_applied_usd"], 2)
@@ -278,25 +343,37 @@ async def place_order(shopper_id: str, lines: list, delivery_option: str = "", n
     sp = s.setdefault("spend", {})
     sp["ytd_usd"] = round(sp.get("ytd_usd", 0) + tot["total_usd"], 2)
     sp["orders_last_12mo"] = sp.get("orders_last_12mo", 0) + 1
+    once = {o["offer_id"] for o in shopper_offers(s) if o.get("once")}
+    s["redeemed_offers"] = sorted(set(s.get("redeemed_offers", [])) | (once & set(tot["offers_applied"])))
     await save_shopper(s)
+    metrics.merchandising(order)
+    # Stock just moved: the rules for this fulfillment center may have changed (a markdown ends, a bundle pauses).
+    await P.refresh(fc, f"order {order_id}")
     await after_change(shopper_id)
     bo = (f" {len(backordered)} item{'s' if len(backordered) > 1 else ''} backordered: "
           + "; ".join(f"{short(b['name'])} x{b['qty']} (ETA {b['eta']})" for b in backordered) + ".") if backordered else ""
     where = (f"Pickup at {store_name}, ready today" if option == C.PICKUP_OPTION
              else f"{option}, arriving {order['eta']} from {C.FULFILLMENT_CENTERS[fc]['name']}")
     credit = f" {money(tot['store_credit_applied_usd'])} store credit applied." if tot["store_credit_applied_usd"] else ""
+    promos = [p["label"] for p in tot["promotions"]]
+    if promos:
+        credit += " Applied: " + ", ".join(promos) + "."
+    if tot["bonus_points"]:
+        credit += f" Includes {tot['bonus_points']} bonus points."
     return {"ok": True, "status": status, "charge_usd": tot["amount_due_usd"], "item": order,
             "summary": f"Order {order_id} placed: {len(ls)} item{'s' if len(ls) > 1 else ''}, {money(tot['total_usd'])} "
                        f"({money(tot['savings_usd'])} saved, {tot['points_earned']} points earned).{credit} {where}.{bo}"}
 
 
 async def request_price_match(shopper_id: str, lines: list, sku: str, competitor: str, competitor_price_usd: float,
-                              delivery_option: str = "", notes: str = "") -> dict:
+                              delivery_option: str = "", notes: str = "", pricing_version: str = "",
+                              priced_hour: int | None = None, sources: dict | None = None) -> dict:
     """Place an order with one item matched to a competitor's lower price.
     Held for a Customer Care decision in AOM's approval tier before it can
     run; once approved the item is re-priced and the order is placed."""
     s = await load_shopper(shopper_id)
-    ls = _normalize_lines(s, lines)
+    lock = {"pricing_version": pricing_version, "priced_hour": priced_hour, "sources": sources}
+    ls, _, _ = await _price(s, lines, _option(s, delivery_option), None, pricing_version, priced_hour)
     line = next((l for l in ls if l["sku"] == sku), None)
     if not line:
         raise ToolError(f"{sku} isn't in this order, so there is nothing to match")
@@ -305,7 +382,7 @@ async def request_price_match(shopper_id: str, lines: list, sku: str, competitor
     price = round(float(competitor_price_usd), 2)
     if price >= line["unit_price"]:
         # Nothing to match: our member price is already as low. Just place it.
-        return await place_order(shopper_id, lines, delivery_option, notes)
+        return await place_order(shopper_id, lines, delivery_option, notes, **lock)
     floor = round(line["list_price"] * C.PRICE_MATCH_FLOOR_PCT / 100.0, 2)
     if price < floor:
         raise ToolError(f"A matched price can't go below {money(floor)} for {short(line['name'])} "
@@ -314,7 +391,7 @@ async def request_price_match(shopper_id: str, lines: list, sku: str, competitor
     if saving > C.PRICE_MATCH_MAX_SAVING_USD:
         raise ToolError(f"Price matches are capped at {money(C.PRICE_MATCH_MAX_SAVING_USD)} per order")
     res = await place_order(shopper_id, lines, delivery_option,
-                            notes or f"Price match: {competitor} at {money(price)}", _match={sku: price})
+                            notes or f"Price match: {competitor} at {money(price)}", **lock, _match={sku: price})
     if res.get("ok"):
         res["summary"] = (f"Price match applied: {short(line['name'])} at {competitor}'s {money(price)}, saving {money(saving)}. "
                           + res["summary"])
@@ -324,7 +401,9 @@ async def request_price_match(shopper_id: str, lines: list, sku: str, competitor
 
 async def set_subscription(shopper_id: str, sku: str, qty: int, cadence_weeks: int = 4) -> dict:
     s = await load_shopper(shopper_id)
-    ln = _line(s, sku, qty)
+    ln = (await _price(s, [{"sku": sku, "qty": qty}]))[0][0]
+    # A subscription is priced at the member tier; promotions of the day don't carry into future shipments.
+    ln["unit_price"] = C.member_price(sku, s["membership"]["tier"], ln["qty"])
     if not C.PRODUCT_BY_SKU[sku]["consumable"]:
         raise ToolError("Subscribe & Save is for everyday essentials you reorder, not one-time purchases")
     cadence = int(cadence_weeks)

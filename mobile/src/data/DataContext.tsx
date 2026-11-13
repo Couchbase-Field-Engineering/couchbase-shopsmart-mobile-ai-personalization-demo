@@ -1,9 +1,10 @@
 import * as Crypto from 'expo-crypto';
-import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError, type LoginResponse } from '../api';
 import { createLocalDb } from '../db/engine';
 import { EMPTY, type LocalDb, type Snapshot } from '../db/localDb';
 import { answerOffline } from '../features/assistant/offline';
+import { priceCtx, type PriceCtx } from '../pricing';
 import { useAuth } from '../session/AuthContext';
 import type { ChatMessage, OrderRequest, SyncState } from '../types';
 
@@ -19,7 +20,14 @@ type Ctx = {
   cart: Record<string, number>;
   cartCount: number;
   setQty: (sku: string, qty: number) => void;
-  addToCart: (sku: string, qty?: number) => void;
+  /** `source` records what put the item in front of the shopper (pick, cross_sell, upsell, bundle, deal...). */
+  addToCart: (sku: string, qty?: number, source?: string) => void;
+  /** Replace one item with its step-up, keeping the quantity. */
+  swapInCart: (from: string, to: string) => void;
+  /** sku -> what led to it being added; sent with the order so merchandising can be measured. */
+  sources: Record<string, string>;
+  /** Everything needed to price on this phone: catalog, tier, pricing rules, the hour, personal offers. */
+  price: PriceCtx | null;
   clearCart: () => void;
   /** Put the smart cart (the model's selected lines) back in the cart. */
   refillCart: () => void;
@@ -45,7 +53,19 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const [liveChat, setLiveChat] = useState<ChatMessage[]>([]);
   const [dbLocation, setDbLocation] = useState<string | null>(null);
   const [cart, setCart] = useState<Record<string, number>>({});
+  const [sources, setSources] = useState<Record<string, string>>({});
   const seeded = useRef(false);
+  // Time-of-day promotions follow the clock: re-price once a minute.
+  const [minute, setMinute] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setMinute((m) => m + 1), 60000);
+    return () => clearInterval(t);
+  }, []);
+  const price = useMemo(
+    () => priceCtx(snap),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [snap.catalog, snap.shopper, snap.pricing, snap.recs, minute],
+  );
 
   const reload = useCallback(async () => {
     if (dbRef.current) setSnap(await dbRef.current.read());
@@ -92,6 +112,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       setSnap(EMPTY);
       setLiveChat([]);
       setCart({});
+      setSources({});
       seeded.current = false;
       setSync((st) => ({ ...st, status: 'stopped', detail: undefined }));
     };
@@ -112,7 +133,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (seeded.current || !snap.recs) return;
     seeded.current = true;
-    setCart(Object.fromEntries(snap.recs.lines.filter((l) => l.selected).map((l) => [l.sku, l.qty])));
+    const sel = snap.recs.lines.filter((l) => l.selected);
+    setCart(Object.fromEntries(sel.map((l) => [l.sku, l.qty])));
+    setSources(Object.fromEntries(sel.map((l) => [l.sku, 'smart_cart'])));
   }, [snap.recs]);
 
   const setQty = useCallback((sku: string, qty: number) => {
@@ -123,10 +146,29 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       return next;
     });
   }, []);
-  const addToCart = useCallback((sku: string, qty = 1) => setCart((c) => ({ ...c, [sku]: Math.min(24, (c[sku] ?? 0) + qty) })), []);
-  const clearCart = useCallback(() => setCart({}), []);
+  const addToCart = useCallback((sku: string, qty = 1, source = 'browse') => {
+    setCart((c) => ({ ...c, [sku]: Math.min(24, (c[sku] ?? 0) + qty) }));
+    // The first thing that put the item in the cart keeps the credit.
+    setSources((s) => (s[sku] ? s : { ...s, [sku]: source }));
+  }, []);
+  const swapInCart = useCallback((from: string, to: string) => {
+    setCart((c) => {
+      const { [from]: qty = 1, ...rest } = c;
+      return { ...rest, [to]: Math.min(24, (rest[to] ?? 0) + qty) };
+    });
+    setSources((s) => {
+      const { [from]: _dropped, ...rest } = s;
+      return { ...rest, [to]: 'upsell' };
+    });
+  }, []);
+  const clearCart = useCallback(() => {
+    setCart({});
+    setSources({});
+  }, []);
   const refillCart = useCallback(() => {
-    setCart((c) => ({ ...Object.fromEntries((snap.recs?.lines ?? []).filter((l) => l.selected).map((l) => [l.sku, l.qty])), ...c }));
+    const sel = (snap.recs?.lines ?? []).filter((l) => l.selected);
+    setCart((c) => ({ ...Object.fromEntries(sel.map((l) => [l.sku, l.qty])), ...c }));
+    setSources((s) => ({ ...Object.fromEntries(sel.map((l) => [l.sku, 'smart_cart'])), ...s }));
   }, [snap.recs]);
 
   const request = useCallback(
@@ -188,7 +230,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <DataContext.Provider
-      value={{ snap, sync, offline, setOffline, dbLocation, request, cart, cartCount, setQty, addToCart, clearCart, refillCart, ask, thinking, liveChat, refresh: reload }}
+      value={{ snap, sync, offline, setOffline, dbLocation, request, cart, cartCount, setQty, addToCart, swapInCart, sources, price, clearCart, refillCart, ask, thinking, liveChat, refresh: reload }}
     >
       {children}
     </DataContext.Provider>

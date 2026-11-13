@@ -70,6 +70,9 @@ spec:
               valueFrom: { secretKeyRef: { name: shopsmart-app-secrets, key: COUCHBASE_PASSWORD } }
             - name: APP_SECRET
               valueFrom: { secretKeyRef: { name: shopsmart-app-secrets, key: APP_SECRET } }
+            - { name: PRICING_TZ, value: {{ .Values.backend.pricing.tz | quote }} }
+            - { name: DEMO_HOUR, value: {{ .Values.backend.pricing.demoHour | toString | quote }} }
+            - { name: PRICING_REFRESH_SECONDS, value: {{ .Values.backend.pricing.refreshSeconds | toString | quote }} }
             {{- if .Values.aom.enabled }}
             - { name: AOM_URL, value: {{ .Values.aom.url | quote }} }
             - { name: AOM_AUTO_REGISTER, value: "true" }

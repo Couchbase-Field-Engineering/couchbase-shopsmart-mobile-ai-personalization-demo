@@ -2,35 +2,12 @@
 
     cd backend && pytest -q
 """
-import os
-import subprocess
-import sys
 import time
 import uuid
 
-import pytest
-
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 EXPORT = "2026-11-13"
 MAYA, DEVON, SOFIA = "S00101001", "S00101002", "S00101003"
 MIXER, COFFEE, DOG_FOOD, CONSOLE = "SS-660102", "SS-110245", "SS-550118", "SS-770229"
-
-
-@pytest.fixture(scope="module")
-def client(tmp_path_factory):
-    dump = tmp_path_factory.mktemp("dump")
-    subprocess.run([sys.executable, os.path.join(ROOT, "databricks", "generate_mock_dump.py"),
-                    "--export-date", EXPORT, "--target-mb", "3", "--out", str(dump)], check=True,
-                   capture_output=True)
-    os.environ.update(STORE_DRIVER="memory", DUMP_DIR=str(dump), AOM_URL="", SG_ADMIN_URL="")
-    from fastapi.testclient import TestClient
-    from app.main import app
-    with TestClient(app) as c:
-        for _ in range(100):
-            if c.get("/api/health").json()["load"] == "loaded":
-                break
-            time.sleep(0.1)
-        yield c
 
 
 def login(client, member_number, last):
@@ -76,6 +53,9 @@ def test_profile_recommendations_and_store_sync(client):
     recs = docs[("recommendations", f"recs::{sid}")]
     assert {l["sku"] for l in recs["lines"][:2]} == {"SS-440129", COFFEE}
     assert all(l["unit_price"] < l["list_price"] for l in recs["lines"])  # Plus pricing
+    assert [o["offer_id"] for o in recs["offers"]] == ["OF-MAYA-BABY", "OF-MAYA-PTS"]  # tailored promotions from loyalty data
+    pricing = docs[("catalog", "pricing::FC-NE")]  # the rules engine's document for her fulfillment center
+    assert pricing["sku_rules"]["SS-220134"]["overstock"]["pct_off"] == 15 and "no_promo" in pricing["sku_rules"][COFFEE]
     assert recs["for_you"][0]["sku"] == MIXER
     pm = recs["price_matches"][0]
     assert pm["sku"] == MIXER and pm["competitor"] == "Brightway Market" and pm["saving_usd"] == 26.0  # the price-match story
@@ -132,7 +112,7 @@ def test_assistant_context_cache_and_guide(client):
     g = client.post("/api/assistant", headers=h, json={"message": "How does a price match work?"}).json()
     assert g["personal"] is False and "customer care" in g["reply"].lower()
     p = client.post("/api/assistant", headers=h, json={"message": "How much is the pet bed?"}).json()
-    assert p["personal"] and "$59.99" in p["reply"]  # Member tier pays list
+    assert p["personal"] and "$50.99" in p["reply"]  # Member tier pays list, less his 15% personal offer
     q = client.post("/api/assistant", headers=h, json={"message": "How much is the yoga mat?"}).json()
     assert q["context"]["status"] == "hit" and "yoga mat" in q["reply"].lower()  # cached context, live item lookup
     docs = pull(client, h)
@@ -163,6 +143,7 @@ def test_purchase_limit_and_business_rules(client):
     r = push(client, h, sid, "place_order", {"lines": [{"sku": "SS-110777", "qty": 3}], "delivery_option": "Store pickup"})
     assert r["status"] == "confirmed" and r["item"]["pickup_store"] == "ShopSmart Plano"
     assert r["item"]["lines"][0]["unit_price"] == round(11.99 * 0.85, 2)  # Premier 10% + multi-buy 5%
+    assert [a["rule"] for a in r["item"]["lines"][0]["adjustments"]] == ["tier", "multi_buy"]
     r = push(client, h, sid, "place_order", {"lines": [{"sku": "SS-000000", "qty": 1}]})
     assert r["status"] == "failed" and "Unknown item" in r["summary"]
     r = push(client, h, sid, "get_recommendations", {})

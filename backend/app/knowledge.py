@@ -62,6 +62,22 @@ FAQ = [
           "shoppers get a chance to buy one. An order that goes over the limit is not placed; remove the item and the rest "
           "of your cart checks out normally. Premier members get early access to limited releases, not a higher limit.",
      "keywords": ["limit", "limited", "one per", "more than one", "second", "restricted", "console", "household"]},
+    {"q": "Why did a price change today?",
+     "a": "Prices follow a few published rules on top of your member discount. An item that is overstocked at your "
+          "fulfillment center is marked down 10 to 15%. Some promotions run only at certain hours: breakfast items are 10% "
+          "off from 6 to 10 am, household essentials 5% off from 1 to 4 pm, and store pickup takes 5% off everything from 5 "
+          "to 8 pm. A competitor price within 8% of ours is matched automatically; a bigger gap is a price-match request. "
+          "Items that are nearly sold out or in high demand are never promoted. Discounts add up to at most 40% off list, "
+          "and the price your phone showed when you built the cart is the price you pay, even if it syncs later.",
+     "keywords": ["price change", "change", "changed", "why did", "why is", "dynamic", "went up", "went down", "different price", "price drop", "marked down",
+                  "overstock", "happy hour", "peak"]},
+    {"q": "How do bundles and personal offers work?",
+     "a": "A bundle takes a percentage off every item in it when they are all in your cart, for example brewer and pods, or "
+          "diapers and wipes; the cart tells you which item is missing and what adding it saves. A bundle pauses while one of "
+          "its items is nearly sold out. Personal offers are chosen for you each night from your purchase history and "
+          "membership: a discount on a category or item you buy, or bonus points over a spend level. They apply "
+          "automatically, show in the cart total, and stack with member pricing up to 40% off list.",
+     "keywords": ["bundle", "bundles", "offer", "offers", "promotion", "promo", "coupon", "bonus points", "stack", "combine"]},
     {"q": "What can I do in the app with no signal?",
      "a": "Everything you need to shop: browse the catalog, see your smart cart and picks, find the aisle at your home "
           "store, build and price a cart, and check out. The order is saved to Couchbase Lite on your phone as 'On device' and "
@@ -97,7 +113,17 @@ def guide_markdown(export_date: str) -> str:
               f"and goodwill credits (up to ${C.GOODWILL_MAX_USD:,.0f}, approval required) go to store credit and come off the "
               f"next order. Returns are accepted within {C.RETURN_WINDOW_DAYS} days. Limited items are restricted per household "
               f"over a rolling {C.PURCHASE_LIMIT_WINDOW_DAYS} days.", ""]
-    lines += ["## Products", ""]
+    lines += ["## Dynamic pricing, bundles and offers", "",
+              "Overstock markdowns: " + ", ".join(f"{pct}% off at {ratio}x the normal stock level" for ratio, pct in C.OVERSTOCK_TIERS)
+              + f". Promotions pause at {int(C.LOW_STOCK_RATIO * 100)}% of the normal level or for high-demand items. "
+              f"Competitor prices at or above {C.AUTO_MATCH_MIN_PCT_OF_LIST}% of list are matched automatically. Discounts are "
+              f"capped at {C.MAX_DISCOUNT_PCT}% off list. An order is priced with the rules its phone used (price lock, 48 hours).", ""]
+    for w in C.TIME_WINDOWS:
+        lines.append(f"- {w['label']} ({w['start_hour']}:00-{w['end_hour']}:00): {w['reason']}.")
+    for b in C.BUNDLES:
+        lines.append(f"- {b['name']} bundle: " + " + ".join(C.PRODUCT_BY_SKU[x]['name'].split(',')[0] for x in b["skus"])
+                     + f", {b['pct_off']}% off each. {b['reason']}.")
+    lines += ["", "## Products", ""]
     for code, cat in C.CATEGORIES.items():
         items = [p for p in C.PRODUCTS if p["category"] == code]
         if not items:
@@ -167,4 +193,6 @@ def shopper_profile_markdown(s: dict) -> str:
         f"Segment: {m.get('segment')}. Next best offer: {m.get('next_best_offer')}. Churn risk {m.get('churn_risk')}. "
         f"Predicted basket ${m.get('predicted_basket_usd', 0):,.0f}. Smart cart: {cart or 'nothing due'}. "
         f"Picks: {picks}. Price watch: {watch}.",
+        "Personal offers: " + ("; ".join(f"{o['title']} ({o['reason']}, driver: {o.get('driver')}, expires {o.get('expires')})"
+                                         for o in m.get("offers", [])) or "none") + ".",
     ])

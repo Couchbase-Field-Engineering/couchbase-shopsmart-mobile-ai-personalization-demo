@@ -23,7 +23,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from . import aom_bootstrap, assistant, config, loader, metrics, personalization, rag_app, sgw, worker
+from . import aom_bootstrap, assistant, config, loader, metrics, personalization, pricing, rag_app, sgw, worker
 from .aom_client import aom
 from .docs import (CATALOG_ID, STATE, chat_id, ctx_id, now_iso, recs_id, shopper_channel, shopper_id_doc, store_channel,
                    store_id_doc)
@@ -62,10 +62,20 @@ async def lifespan(app: FastAPI):
         _bg.append(asyncio.create_task(aom_bootstrap.run(first)))
     _bg.append(asyncio.create_task(worker.loop()))
     _bg.append(asyncio.create_task(loader.poll_forever()))
+    _bg.append(asyncio.create_task(pricing_loop()))
     async with mcp.session_manager.run():
         yield
     for t in _bg:
         t.cancel()
+
+
+async def pricing_loop():
+    """Re-evaluate the pricing rules on a timer: the hour changes, and with
+    it which promotion windows are open."""
+    while True:
+        await asyncio.sleep(config.PRICING_REFRESH_SECONDS)
+        if loader.STATUS.get("state") == "loaded":
+            await pricing.refresh_all("timer")
 
 
 app = FastAPI(title="Couchbase ShopSmart Mobile AI Personalization Demo", lifespan=lifespan)
@@ -104,8 +114,9 @@ def current_shopper(authorization: str | None = Header(default=None)) -> str:
 async def index():
     """Landing page: where everything in the demo lives."""
     rows = [
-        ("http://localhost:8084/story", "The story: shopping that doesn't wait for signal, and a Databricks bill that stops growing per tap (start here)"),
-        ("http://localhost:8084", "The app in a browser (docker compose service <code>web</code>)"),
+        ("https://localhost:5151/story", "The story: shopping that doesn't wait for signal, and a Databricks bill that stops growing per tap (start here)"),
+        ("https://localhost:5151", "The app in a browser (docker compose service <code>web</code>)"),
+        ("https://localhost:5151/merch", "Merchandising console: live pricing rules, bundles and the levers that move them"),
         ("http://localhost:8203/api/status", "Backend status: export load, Knowledge Base publishing, AOM, Sync Gateway, Databricks offload"),
         ("http://localhost:8203/docs", "Backend API (OpenAPI)"),
         ("http://localhost:8203/shopsmart/mcp", "MCP server <code>shopsmart-shopping</code> (called by AOM)"),
@@ -118,7 +129,7 @@ async def index():
 <style>body{{font-family:-apple-system,"Helvetica Neue",Arial,sans-serif;max-width:760px;margin:48px auto;padding:0 16px;color:#0b0b0c}}
 h1{{color:#ea2328}} li{{margin:10px 0}} a{{color:#ea2328;font-weight:600}}</style></head>
 <body><h1>Couchbase ShopSmart demo</h1>
-<p>This is the backend. Open the app at <a href="http://localhost:8084">http://localhost:8084</a>.
+<p>This is the backend. Open the app at <a href="https://localhost:5151">https://localhost:5151</a>.
 Loaded export: <b>{STATE.get("export_date") or "loading..."}</b> ({loader.STATUS.get("state")}).</p>
 <ul>{items}</ul></body></html>"""
 
@@ -141,6 +152,8 @@ async def status():
             aom_state["health"] = {"error": str(exc)[:200]}
     return {"store": store.driver, "export_date": STATE.get("export_date"),
             "load": {k: v for k, v in loader.STATUS.items()}, "aom": aom_state, "metrics": metrics.snapshot(),
+            "pricing": dict(pricing.STATS, refresh_seconds=config.PRICING_REFRESH_SECONDS,
+                            hour=pricing.hour_now(await pricing.get_signals()), recent_changes=list(pricing.CHANGES)[:8]),
             "sync_gateway": {"configured": sgw.enabled(), "public_url": config.SG_PUBLIC_URL or None, "db": config.SG_DB},
             "mcp_server": {"server_id": config.AOM_MCP_SERVER_ID, "registered_url": config.AOM_MCP_PUBLIC_URL}}
 
@@ -174,7 +187,8 @@ async def _session(shopper: dict) -> dict:
     # Recommendations are pre-built for recently active shoppers; everyone else gets theirs here.
     if not await store.get("recommendations", recs_id(sid)):
         await personalization.refresh_recommendations(sid)
-    return {"token": make_token(sid), "shopper_id": sid, "sync_gateway": await sgw.mint_session(sid, _store_of(shopper)),
+    return {"token": make_token(sid), "shopper_id": sid,
+            "sync_gateway": await sgw.mint_session(sid, _store_of(shopper), shopper["delivery"]["fulfillment_center"]),
             "export_date": STATE.get("export_date")}
 
 
@@ -189,7 +203,8 @@ async def login(req: LoginRequest):
             "shopper": {"first_name": shopper["first_name"], "last_name": shopper["last_name"], "email": shopper.get("email"),
                         "tier": shopper["membership"]["tier"], "tier_name": shopper["membership"]["tier_name"],
                         "home_store": shopper.get("home_store")},
-            "channels": [shopper_channel(sid), store_channel(_store_of(shopper) or "-"), "catalog"]}
+            "channels": [shopper_channel(sid), store_channel(_store_of(shopper) or "-"),
+                         pricing.fc_channel(shopper["delivery"]["fulfillment_center"]), "catalog"]}
 
 
 @app.post("/api/auth/refresh")
@@ -214,7 +229,8 @@ async def _shopper_docs(shopper_id: str) -> list[dict]:
         return out
     out.append({"collection": "shoppers", "id": shopper_id_doc(shopper_id), "doc": shopper})
     sid = _store_of(shopper)
-    pairs = [("recommendations", recs_id(shopper_id)), ("assistant", chat_id(shopper_id)), ("catalog", CATALOG_ID)]
+    pairs = [("recommendations", recs_id(shopper_id)), ("assistant", chat_id(shopper_id)), ("catalog", CATALOG_ID),
+             ("catalog", pricing.pricing_id(shopper["delivery"]["fulfillment_center"]))]
     if sid:
         pairs.append(("stores", store_id_doc(sid)))
     pairs += [("context_cache", ctx_id(shopper_id, key)) for key in assistant.CONTEXT_KEYS]
@@ -287,6 +303,110 @@ async def ask(req: AskRequest, shopper_id: str = Depends(current_shopper)):
         return await assistant.ask(shopper_id, req.message[:1000], req.session_id)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
+
+
+# --------------------------------------------------------------------------
+# Merchandising console (web/merch.html). Demo levers, like /api/admin/reload:
+# no sign-in, so keep this backend off the public internet.
+# --------------------------------------------------------------------------
+async def _merch_state(fc: str) -> dict:
+    from . import catalog as C
+    from .actions import get_inventory
+    if fc not in C.FULFILLMENT_CENTERS:
+        raise HTTPException(404, "Unknown fulfillment center")
+    doc = await pricing.refresh(fc, "console")
+    signals = await pricing.get_signals()
+    hour = pricing.hour_now(signals)
+    inv, _ = await get_inventory(fc)
+    rows = []
+    for p in C.PRODUCTS:
+        sku = p["sku"]
+        line = pricing.quote("MEMBER", {sku: 1}, doc, hour)[0]
+        mp = (signals.get("market_prices") or {}).get(sku)
+        rows.append({"sku": sku, "name": p["name"], "category": C.CATEGORIES[p["category"]]["name"], "list_price": p["list_price"],
+                     "shelf_price": line["unit_price"], "adjustments": line["adjustments"],
+                     "on_hand": int(inv["on_hand"].get(sku, 0)), "level": C.stock_level(sku),
+                     "rules": doc["sku_rules"].get(sku, {}), "competitor": mp})
+    return {"fc": fc, "fc_name": doc["fc_name"], "fulfillment_centers": {k: v["name"] for k, v in C.FULFILLMENT_CENTERS.items()},
+            "version": doc["version"], "generated_at": doc.get("generated_at"), "hour": hour, "clock": signals.get("clock"),
+            "products": rows,
+            "time_rules": [dict(w, active=pricing.window_active(w, hour)) for w in doc["time_rules"]],
+            "bundles": doc["bundles"], "changes": [c for c in pricing.CHANGES if c["fc"] == fc][:25],
+            "engine": dict(pricing.STATS, refresh_seconds=config.PRICING_REFRESH_SECONDS, signals_source=signals.get("source")),
+            "merchandising": metrics.snapshot()["merchandising"], "competitors": C.COMPETITORS,
+            "auto_match_min_pct_of_list": C.AUTO_MATCH_MIN_PCT_OF_LIST, "export_date": STATE.get("export_date")}
+
+
+@app.get("/api/merch/state")
+async def merch_state(fc: str = "FC-NE"):
+    return await _merch_state(fc)
+
+
+class Simulate(BaseModel):
+    fc: str = "FC-NE"
+    action: str                 # set_inventory | set_hour | set_competitor_price | reset
+    sku: str | None = None
+    value: float | None = None
+    competitor: str | None = None
+
+
+@app.post("/api/merch/simulate")
+async def merch_simulate(req: Simulate):
+    """Change one of the engine's inputs and re-price at once: stock at a
+    fulfillment center, the hour, or a competitor's price."""
+    from . import catalog as C
+    from .actions import get_inventory
+    from .docs import inventory_id
+    if req.fc not in C.FULFILLMENT_CENTERS:
+        raise HTTPException(404, "Unknown fulfillment center")
+    signals = await pricing.get_signals()
+    everywhere = False
+    if req.action == "set_inventory":
+        if req.sku not in C.PRODUCT_BY_SKU or req.value is None or req.value < 0:
+            raise HTTPException(400, "set_inventory needs a sku and a value of 0 or more")
+        inv, _ = await get_inventory(req.fc)
+        inv["on_hand"][req.sku] = int(req.value)
+        inv["updated_at"] = now_iso()
+        await store.upsert("inventory", inventory_id(req.fc), inv)
+    elif req.action == "set_hour":
+        hour = None if req.value is None else int(req.value) % 24
+        signals["clock"] = {**(signals.get("clock") or {}), "tz": config.PRICING_TZ, "demo_hour": hour}
+        await pricing.set_signals(signals)
+        everywhere = True
+    elif req.action == "set_competitor_price":
+        if req.sku not in C.PRODUCT_BY_SKU:
+            raise HTTPException(400, "set_competitor_price needs a sku")
+        prices = signals.setdefault("market_prices", {})
+        if req.value is None:
+            prices.pop(req.sku, None)
+        else:
+            prices[req.sku] = {"competitor": req.competitor if req.competitor in C.COMPETITORS else C.COMPETITORS[0],
+                               "price_usd": round(float(req.value), 2)}
+        await pricing.set_signals(signals)
+        everywhere = True
+    elif req.action == "reset":
+        await store.upsert("inventory", inventory_id(req.fc),
+                           {"type": "inventory", "fc": req.fc, "fc_name": C.FULFILLMENT_CENTERS[req.fc]["name"],
+                            "on_hand": C.initial_inventory(req.fc), "created_at": now_iso()})
+        fresh = pricing.default_signals()
+        fresh.update({k: signals[k] for k in ("source",) if k in signals})
+        fresh["clock"] = {"tz": config.PRICING_TZ, "demo_hour": config.DEMO_HOUR}
+        await pricing.set_signals(fresh)
+        everywhere = True
+    else:
+        raise HTTPException(400, "Unknown action")
+    why = f"console: {req.action}" + (f" {req.sku}" if req.sku else "")
+    if everywhere:
+        await pricing.refresh_all(why)
+    else:
+        await pricing.refresh(req.fc, why)
+    # The demo shoppers' "for you today" notes quote prices and deals: rebuild them so the phones follow at once.
+    for sid in loader.PERSONAS:
+        sh = await store.get("shoppers", shopper_id_doc(sid))
+        if sh and (everywhere or sh["delivery"]["fulfillment_center"] == req.fc):
+            await personalization.refresh_recommendations(sid)
+            await assistant.invalidate_context(sid)
+    return await _merch_state(req.fc)
 
 
 @app.post("/api/admin/reload")

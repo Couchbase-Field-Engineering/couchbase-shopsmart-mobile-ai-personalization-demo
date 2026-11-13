@@ -13,6 +13,68 @@ export type OrderLine = {
   shipped_qty?: number;
   backordered_qty?: number;
   price_matched?: boolean;
+  /** How the item got into the cart: smart_cart, pick, cross_sell, upsell, bundle, deal, offer or browse. */
+  source?: string;
+  adjustments?: Adjustment[];
+};
+
+/** One step in a price: a percentage off list, or (competitor match, price match) a price it was capped at. */
+export type Adjustment = { rule: 'tier' | 'multi_buy' | 'overstock' | 'time' | 'offer' | 'bundle' | 'competitor' | 'price_match'; label: string; pct?: number; price?: number; id?: string };
+
+/** A personal offer issued by the nightly model from purchase history and loyalty data. */
+export type Offer = {
+  offer_id: string;
+  kind: 'category_pct' | 'sku_pct' | 'bonus_points';
+  title: string;
+  reason: string;
+  driver?: string;
+  expires?: string;
+  once?: boolean;
+  category?: string;
+  sku?: string;
+  pct_off?: number;
+  points?: number;
+  min_subtotal_usd?: number;
+};
+
+export type TimeRule = {
+  id: string;
+  label: string;
+  start_hour: number;
+  end_hour: number;
+  pct_off: number;
+  reason: string;
+  tags?: string[];
+  categories?: string[];
+  requires_option?: string;
+  peak?: boolean;
+};
+
+export type Bundle = { id: string; name: string; skus: string[]; pct_off: number; reason: string; kind: 'curated' | 'dynamic'; active: boolean; paused_reason?: string | null };
+
+export type SkuRules = {
+  overstock?: { pct_off: number; label: string; reason: string };
+  no_promo?: { label: string; reason: string };
+  competitor?: { price_cap: number; competitor: string; label: string; reason: string };
+};
+
+/**
+ * The pricing rules for this shopper's fulfillment center (`pricing::<fc>` in
+ * the `catalog` collection, channel `fc:<fc>`). Rules, not prices: the phone
+ * runs the same arithmetic as the backend, so a cart prices itself offline.
+ */
+export type PricingDoc = {
+  type: 'pricing';
+  fc: string;
+  fc_name: string;
+  version: string;
+  sku_rules: Record<string, SkuRules>;
+  time_rules: TimeRule[];
+  bundles: Bundle[];
+  max_discount_pct: number;
+  clock: { tz?: string; demo_hour?: number | null };
+  on_hand: Record<string, number>;
+  generated_at?: string;
 };
 
 export type HistoryOrder = {
@@ -57,7 +119,9 @@ export type Shopper = {
   subscriptions: Subscription[];
   returns?: { return_id: string; order_id: string; sku: string; name: string; qty: number; refund_usd: number; date: string }[];
   credits?: { credit_id: string; amount_usd: number; reason: string; date: string }[];
+  redeemed_offers?: string[];
   ml_scores: Record<string, unknown> & {
+    offers?: Offer[];
     model_version: string;
     segment: string;
     next_best_offer: string;
@@ -141,6 +205,9 @@ export type RecsDoc = {
   lines: CartLine[];
   for_you: Pick[];
   price_matches: PriceMatch[];
+  /** Personal offers still usable (not expired, not redeemed). */
+  offers?: Offer[];
+  pricing_version?: string;
   suggested_total_usd: number;
   suggested_savings_usd: number;
   wallet: { store_credit_usd: number; points: number; payment_method: string; tier: string; tier_name: string; discount_pct: number };
@@ -241,6 +308,11 @@ export type Catalog = {
   price_match_floor_pct: number;
   fulfillment_centers: Record<string, { name: string; city: string }>;
   faq: { q: string; a: string; keywords: string[] }[];
+  /** Cross-sell: what sells with an item, from market-basket analysis. */
+  pairs_with?: Record<string, { sku: string; reason: string }[]>;
+  /** Upsell: the step-up for an item (bigger pack, better model). */
+  upgrades?: Record<string, { sku: string; reason: string }>;
+  max_discount_pct?: number;
 };
 
 export type SyncState = {

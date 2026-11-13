@@ -12,17 +12,19 @@
  */
 import type { Snapshot } from '../../db/localDb';
 import { ids } from '../../db/localDb';
-import { overLimit, unitPrice } from '../../pricing';
+import { bundleSaving, dealOf, hourLabel, overLimit, priceCtx, priceOne, windowActive } from '../../pricing';
 import type { ChatMessage, Product, SuggestedAction } from '../../types';
 
 const KEYWORDS: Record<string, string[]> = {
+  deals: ['deals', 'deal', 'offer', 'offers', 'promo', 'promotion', 'on sale', 'sale today', 'bundle', 'bundles', 'coupon',
+    'markdown', 'marked down', 'goes with', 'go with', 'pair with'],
   rewards: ['points', 'store credit', 'credit', 'wallet', 'rewards', 'membership', 'member', 'tier', 'plus', 'premier', 'balance', 'upgrade'],
   returns: ['return', 'refund', 'damaged', 'wrong item', 'broken', 'send back', 'goodwill', 'exchange', 'arrived'],
   subscription: ['subscribe', 'subscription', 'recurring', 'auto-ship', 'autoship', 'every week', 'every month', 'schedule', 'cadence'],
   availability: ['in stock', 'available', 'availability', 'on hand', 'backorder', 'out of', 'sold out', 'aisle', 'limit', 'limited',
     'more than one', 'second', 'where can i find', 'which aisle'],
-  delivery: ['deliver', 'delivery', 'ship', 'shipping', 'arrive', 'eta', 'when will', 'pickup', 'pick up', 'same-day', 'fee'],
-  pricing: ['price', 'pricing', 'cost', 'how much', 'discount', 'cheaper', 'savings', 'price match', 'match', 'competitor', 'multi-buy', 'deal'],
+  delivery: ['deliver', 'delivery', 'shipping', 'shipped', 'ships', 'arrive', ' eta', 'when will', 'pickup', 'pick up', 'same-day', 'delivery fee'],
+  pricing: ['price', 'pricing', 'cost', 'how much', 'discount', 'cheaper', 'savings', 'price match', 'match', 'competitor', 'multi-buy'],
   history: ['history', 'last order', 'last time', 'previous', 'ordered before', 'usually', 'how often', 'spend', 'spent', 'what did i',
     'my order', 'track', 'order status', 'where is my'],
   preferences: ['preference', 'prefer', 'favorite', 'hide', 'stop showing', "don't show", 'not interested', 'more of', 'less of', 'substitut'],
@@ -93,7 +95,36 @@ export function answerOffline(q: string, snap: Snapshot): Omit<ChatMessage, 'id'
   let text: string | null = null;
   let usedFaq = false;
 
-  if (me && personal) {
+  const price = priceCtx(snap);
+  if (me && intent === 'deals' && price) {
+    // Offers, the hour's promotion, markdowns and bundles, all from the pricing rules on this phone.
+    const pairs = product ? (cat?.pairs_with?.[product.sku] ?? []).filter((x) => price.bySku.has(x.sku)) : [];
+    if (product && /go(es)? (well )?with|pair|bundle/.test(m)) {
+      const b = (snap.pricing?.bundles ?? []).find((x) => x.active && x.skus.includes(product.sku) && x.skus.every((s) => price.bySku.has(s)));
+      text = pairs.length
+        ? `With ${short(product.name)}, shoppers add ${pairs.slice(0, 2).map((x) => `${short(price.bySku.get(x.sku)!.name)} (${x.reason[0].toLowerCase()}${x.reason.slice(1)})`).join(' and ')}.`
+        : `Nothing in particular sells with ${short(product.name)}.`;
+      if (b) text += ` Put ${b.skus.map((s) => short(price.bySku.get(s)!.name)).join(' + ')} in the cart together and each is ${b.pct_off}% off (saves ${money(bundleSaving(price, b))}).`;
+      pairs.slice(0, 2).forEach((x) => actions.push({ label: `View ${short(price.bySku.get(x.sku)!.name)}`, screen: 'product', args: { sku: x.sku, src: 'cross_sell' } }));
+    } else {
+      const parts: string[] = [];
+      const o = price.offers[0];
+      if (o) parts.push(`Your offer: ${o.title}. ${o.reason}${o.expires ? `; good until ${o.expires}` : ''}${price.offers.length > 1 ? `. You have ${price.offers.length - 1} more on the Home tab` : ''}.`);
+      const w = (snap.pricing?.time_rules ?? []).find((x) => windowActive(x, price.hour));
+      if (w) parts.push(`This hour, ${w.label}: ${w.reason} (until ${hourLabel(w.end_hour)}).`);
+      const rules = snap.pricing?.sku_rules ?? {};
+      const marked = Object.keys(rules)
+        .filter((s) => rules[s].overstock && !rules[s].no_promo && price.bySku.has(s))
+        .map((s) => priceOne(price, s)!)
+        .filter((l) => dealOf(l));
+      if (marked.length) parts.push(`Price drops at your fulfillment center: ${marked.slice(0, 3).map((l) => `${short(l.name)} ${money(l.unit)} (overstock markdown)`).join('; ')}.`);
+      const bs = (snap.pricing?.bundles ?? []).filter((b) => b.active && b.skus.every((s) => price.bySku.has(s)));
+      if (bs[0]) parts.push(`Bundle: ${bs[0].skus.map((s) => short(price.bySku.get(s)!.name)).join(' + ')} together are ${bs[0].pct_off}% off each (saves ${money(bundleSaving(price, bs[0]))})${bs.length > 1 ? `, and ${bs.length - 1} more bundles in the app` : ''}.`);
+      text = parts.join(' ') || 'No promotions are running for you right now; every price in the app is already your member price.';
+      if (marked[0]) actions.push({ label: `View ${short(marked[0].name)}`, screen: 'product', args: { sku: marked[0].sku, src: 'deal' } });
+    }
+    actions.push({ label: 'Open Cart', screen: 'cart' });
+  } else if (me && personal) {
     const tier = me.membership.tier_name;
     if (recs && (intent === 'reorder' || (intent === 'subscription' && !product))) {
       const sel = recs.lines.filter((l) => l.selected);
@@ -105,16 +136,22 @@ export function answerOffline(q: string, snap: Snapshot): Omit<ChatMessage, 'id'
       if (urgent.length) text += ` Most urgent: ${urgent.slice(0, 2).map((l) => `${short(l.name)} (~${Math.max(0, l.days_to_runout ?? 0)}d left)`).join(', ')}.`;
       if (low.length) text += ` Stock is short on ${low.slice(0, 2).map((l) => short(l.name)).join(', ')} - part may backorder.`;
       actions.push({ label: 'Review in Cart', screen: 'cart' });
-    } else if ((intent === 'pricing' || intent === 'availability' || intent === 'subscription') && product && cat) {
-      const unit = unitPrice(cat, me, product.list_price, 1);
+    } else if ((intent === 'pricing' || intent === 'availability' || intent === 'subscription') && product && cat && price) {
+      const line = priceOne(price, product.sku)!;
+      const unit = line.unit;
+      const deal = dealOf(line);
       const aisle = snap.store?.aisles?.[product.sku];
-      const known = [...(recs?.lines ?? []), ...(recs?.for_you ?? [])].find((l) => l.sku === product.sku);
-      text = `${product.name} is ${money(unit)} for you (${tier}, list ${money(product.list_price)})`;
-      if (known) text += `; ${known.on_hand_at_fc} on hand at your fulfillment center as of the last sync`;
+      const onHand = snap.pricing?.on_hand?.[product.sku] ?? [...(recs?.lines ?? []), ...(recs?.for_you ?? [])].find((l) => l.sku === product.sku)?.on_hand_at_fc;
+      const known = onHand != null;
+      text = `${product.name} is ${money(unit)} for you (${tier}, list ${money(product.list_price)}${deal ? `, including ${deal.label[0].toLowerCase()}${deal.label.slice(1)}` : ''})`;
+      if (known) text += `; ${onHand} on hand at your fulfillment center as of the last sync`;
       if (aisle && snap.store) text += `${known ? ', and' : ';'} it's in aisle ${aisle} at ${snap.store.name}`;
       text += '.';
+      const up = cat.upgrades?.[product.sku];
+      const upP = up ? price.bySku.get(up.sku) : undefined;
+      if (intent === 'pricing' && up && upP) text += ` Worth a look: ${short(upP.name)} - ${up.reason[0].toLowerCase()}${up.reason.slice(1)}.`;
       const pm = recs?.price_matches.find((p) => p.sku === product.sku);
-      if (pm) text += ` ${pm.competitor} has it for ${money(pm.competitor_price_usd)} - check out with a price match to save ${money(pm.saving_usd)}.`;
+      if (pm && pm.competitor_price_usd < unit) text += ` ${pm.competitor} has it for ${money(pm.competitor_price_usd)} - check out with a price match to save ${money(Math.round((unit - pm.competitor_price_usd) * 100) / 100)}.`;
       const lim = product.limit_per_household ? overLimit(me, product, 1) : null;
       if (product.limit_per_household) {
         text += ` It's limited to ${product.limit_per_household} per household every 30 days.`;

@@ -13,6 +13,10 @@ when a newer `dt=YYYY-MM-DD/_SUCCESS` partition appears), or by hand:
 3. Index member numbers for sign-in, publish the catalog and one `stores`
    document per store, and build the recommendations for every recently
    active shopper (everyone else gets theirs at sign-in).
+   The partition's `_pricing_signals.json` (competitor prices, demand
+   forecast, promotion windows, bundles and cross-sell affinities) feeds the
+   pricing engine, which writes one `pricing::<fc>` rule document per
+   fulfillment center.
 4. Publish to the AOM Knowledge Base: the Shopping Guide, and one profile
    document per recently active shopper (demo personas first), replacing
    yesterday's version of each. The assistant's AOM RAG Application is then
@@ -33,7 +37,7 @@ import os
 import time
 
 from . import catalog as C
-from . import config, knowledge, personalization, rag_app
+from . import config, knowledge, personalization, pricing, rag_app
 from .aom_client import AOMError, aom
 from .docs import (CATALOG_CHANNEL, CATALOG_ID, STATE, now_iso, shopper_channel, shopper_id_doc, store_channel,
                    store_id_doc)
@@ -49,6 +53,27 @@ _TASKS: list = []  # keep a reference so background KB publishing is not garbage
 def latest_partition(dump_dir: str) -> str | None:
     parts = sorted(p for p in glob.glob(os.path.join(dump_dir, "dt=*")) if os.path.exists(os.path.join(p, "_SUCCESS")))
     return parts[-1] if parts else None
+
+
+def read_signals(partition: str) -> dict | None:
+    path = os.path.join(partition, "_pricing_signals.json")
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+async def load_pricing(partition: str | None, why: str):
+    """Pricing signals from the export -> the engine's rule documents. The
+    demo clock (a presenter's override on the merchandising console) survives
+    a reload."""
+    prev = await store.get("lookups", "pricing_signals") or {}
+    # An export without a signals file keeps yesterday's signals rather than dropping to the built-in defaults.
+    sig = (read_signals(partition) if partition else None) or ({**prev} if prev.get("bundles") else None) or pricing.default_signals()
+    sig["clock"] = prev.get("clock") or {"tz": config.PRICING_TZ, "demo_hour": config.DEMO_HOUR}
+    await pricing.set_signals(sig)
+    await pricing.refresh_all(why)
+    return sig
 
 
 def read_rows(partition: str):
@@ -80,6 +105,8 @@ async def load(dump_dir: str | None = None, force=False, kb=True) -> dict:
         STATE["export_date"] = export_date
         STATUS.update(state="loaded", **state)
         log.info("Export %s already loaded", export_date)
+        if not await store.get("catalog", pricing.pricing_id("FC-NE")):
+            await load_pricing(part, "startup")
         pb = await store.get("lookups", "kbdoc::guide") or {}
         if kb and config.KB_ENABLED and aom.admin_enabled and pb.get("export_date") != export_date:
             _TASKS.append(asyncio.create_task(publish_kb(export_date, await _kb_window())))
@@ -131,7 +158,9 @@ async def load(dump_dir: str | None = None, force=False, kb=True) -> dict:
     await store.upsert_many("shoppers", batch)
     await store.upsert_many("lookups", logins)
 
+    signals = await load_pricing(part, f"export {export_date}")
     cat = C.public_catalog()
+    cat.update({"pairs_with": signals.get("pairs_with") or cat["pairs_with"], "upgrades": signals.get("upgrades") or cat["upgrades"]})
     cat.update({"type": "catalog", "faq": [{"q": f["q"], "a": f["a"], "keywords": f["keywords"]} for f in knowledge.FAQ],
                 "export_date": export_date, "channels": [CATALOG_CHANNEL], "updated_at": now_iso()})
     await store.upsert("catalog", CATALOG_ID, cat)
@@ -147,7 +176,7 @@ async def load(dump_dir: str | None = None, force=False, kb=True) -> dict:
 
     summary = {"export_date": export_date, "partition": part, "rows": rows, "stores": len(C.STORES),
                "home_stores_in_export": len(stores_seen - {None}), "skipped_over_memory_limit": skipped,
-               "carried_live_state": carried, "bytes": nbytes, "recommendations_built": len(build),
+               "carried_live_state": carried, "bytes": nbytes, "recommendations_built": len(build), "pricing_signals": signals.get("source"),
                "load_seconds": round(time.time() - t0, 1), "driver": store.driver, "loaded_at": now_iso()}
     await store.upsert("lookups", "load_state", summary)
     STATUS.update(state="loaded", **summary)

@@ -37,6 +37,29 @@ STATS: dict = {
 }
 OFFLINE_GAP_SECONDS = 20
 
+# Merchandising: what each way of getting an item into the cart sold, and what
+# each kind of promotion gave away. `source` on an order line is set by the
+# app when the shopper adds the item (smart cart, a pick, a cross-sell at
+# checkout, an upsell, a bundle prompt, a deal, plain browsing).
+MERCH: dict = {"revenue_by_source": {}, "units_by_source": {}, "discount_by_rule": {}, "bundles_sold": 0,
+               "offers_redeemed": 0, "bonus_points_awarded": 0, "orders_with_promotion": 0, "orders_price_locked": 0}
+
+
+def merchandising(order_item: dict) -> None:
+    for l in order_item.get("lines", []):
+        src = l.get("source") or "browse"
+        MERCH["revenue_by_source"][src] = round(MERCH["revenue_by_source"].get(src, 0) + l["line_total"], 2)
+        MERCH["units_by_source"][src] = MERCH["units_by_source"].get(src, 0) + l["qty"]
+    for p in order_item.get("promotions", []):
+        MERCH["discount_by_rule"][p["label"]] = round(MERCH["discount_by_rule"].get(p["label"], 0) + p["saved_usd"], 2)
+    MERCH["bundles_sold"] += len(order_item.get("bundles_applied", []))
+    MERCH["offers_redeemed"] += len(order_item.get("offers_applied", []))
+    MERCH["bonus_points_awarded"] += int(order_item.get("bonus_points") or 0)
+    MERCH["orders_with_promotion"] += 1 if order_item.get("promotions") else 0
+    MERCH["orders_price_locked"] += 1 if order_item.get("price_locked") else 0
+    # Pricing rules, offers and affinities for the order were read from Couchbase, not scored live.
+    STATS["model_serving_calls_avoided"] += 1
+
 
 def assistant(result: dict) -> None:
     STATS["assistant_turns"] += 1
@@ -106,6 +129,9 @@ def snapshot() -> dict:
     s["context_hit_rate"] = round(100 * s["context_hits"] / turns, 1) if turns else None
     s["llm_hit_rate"] = round(100 * s["llm_hits"] / s["llm_calls"], 1) if s["llm_calls"] else None
     s["dbx_cost_per_query_usd"] = DBX_COST_PER_QUERY_USD
+    led = MERCH["revenue_by_source"]
+    s["merchandising"] = {**MERCH, "recommendation_led_revenue_usd": round(
+        sum(v for k, v in led.items() if k in ("pick", "cross_sell", "upsell", "bundle", "deal", "offer", "smart_cart")), 2)}
     s["estimated_dbx_spend_avoided_usd"] = round(
         (s["warehouse_queries_avoided"] + s["model_serving_calls_avoided"]) * DBX_COST_PER_QUERY_USD, 2)
     return s

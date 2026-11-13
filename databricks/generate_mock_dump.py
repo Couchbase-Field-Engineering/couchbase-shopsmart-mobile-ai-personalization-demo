@@ -10,14 +10,17 @@ Writes the exact layout a Databricks job produces with
         ...
         _SUCCESS
         _manifest.json                   # row/byte counts + schema version (written by the notebook)
+        _pricing_signals.json            # competitor prices, demand forecast, promotion windows,
+                                         # bundles and cross-sell affinities for the pricing engine
 
 Each line is one Couchbase ShopSmart shopper joined with their membership,
 wallet, household, home store, delivery defaults, preferences, the last
 orders, month-to-month replenishment per SKU, and the scores the next-basket
 model (shopsmart-next-basket-v2.3) produced in Databricks: per-category
 affinity, a smart cart with a confidence per line, days-to-runout,
-recommended items with a reason each, competitor price watches and churn
-risk.
+recommended items with a reason each, competitor price watches, churn risk
+and the personal offers the loyalty model issued (a category or item
+discount, bonus points), each with the reason it was chosen for this shopper.
 
 ShopSmart is a fictional retailer; every shopper is synthetic.
 
@@ -230,6 +233,7 @@ class Gen:
                 "replenish_lines": cart[:8],
                 "recommended": recommended,
                 "price_watch": price_watch,
+                "offers": self.offers(sid, tier, churn, affinity, recommended),
                 "segment": r.choice(SEGMENTS),
                 "next_best_offer": "win_back" if churn > 0.45 else ("replenish" if cart else ("upgrade_to_plus" if tier == "MEMBER" else "discover")),
             },
@@ -238,6 +242,32 @@ class Gen:
         if overrides:
             deep_update(row, overrides)
         return row
+
+    def offers(self, sid, tier, churn, affinity, recommended):
+        """Tailored promotions from loyalty data: what the offer is depends on
+        the tier, how likely the shopper is to lapse, and what they buy."""
+        r = self.r
+        out = []
+        top = max(C.CATEGORIES, key=lambda c: affinity[C.CATEGORIES[c]["affinity"]])
+        exp = (self.d0 + dt.timedelta(days=r.randint(3, 10))).isoformat()
+        if churn > 0.45:
+            out.append({"offer_id": f"OF-{sid[-6:]}-WB", "kind": "category_pct", "category": top, "pct_off": 15,
+                        "title": f"Welcome back: 15% off {C.CATEGORIES[top]['name']}", "driver": "churn risk",
+                        "reason": "You haven't ordered in a while, and this is the aisle you shop most", "expires": exp, "once": True})
+        elif tier != "MEMBER":
+            out.append({"offer_id": f"OF-{sid[-6:]}-CAT", "kind": "category_pct", "category": top, "pct_off": 10,
+                        "title": f"{C.TIER_BY_CODE[tier]['name']} offer: 10% off {C.CATEGORIES[top]['name']}", "driver": "loyalty tier",
+                        "reason": "Your most-shopped category this quarter", "expires": exp, "once": False})
+        else:
+            out.append({"offer_id": f"OF-{sid[-6:]}-PTS", "kind": "bonus_points", "min_subtotal_usd": 75, "points": 500,
+                        "title": "500 bonus points on $75 or more", "driver": "loyalty tier",
+                        "reason": "You're 1 order away from your next reward", "expires": exp, "once": True})
+        if recommended and r.random() < 0.4:
+            p = C.PRODUCT_BY_SKU[recommended[0]["sku"]]
+            out.append({"offer_id": f"OF-{sid[-6:]}-SKU", "kind": "sku_pct", "sku": p["sku"], "pct_off": 10,
+                        "title": f"10% off {p['name'].split(',')[0]}", "driver": "browsing history",
+                        "reason": "You looked at it this week", "expires": exp, "once": True})
+        return out
 
     def _mix(self, history):
         tot = {}
@@ -320,6 +350,13 @@ class Gen:
                               {"sku": "SS-770114", "confidence": 0.62, "reason": "Popular with commuters like you"}],
                           "price_watch": [{"sku": "SS-660102", "competitor": "Brightway Market", "competitor_price_usd": 239.99,
                                            "seen_on": d0.isoformat()}],
+                          "offers": [
+                              {"offer_id": "OF-MAYA-BABY", "kind": "category_pct", "category": "baby", "pct_off": 10,
+                               "title": "10% off Baby this week", "driver": "purchase history",
+                               "reason": "You've bought diapers 6 months running", "expires": (d0 + dt.timedelta(days=6)).isoformat(), "once": False},
+                              {"offer_id": "OF-MAYA-PTS", "kind": "bonus_points", "min_subtotal_usd": 150, "points": 500,
+                               "title": "500 bonus points on $150 or more", "driver": "loyalty tier",
+                               "reason": "Plus members who order weekly get a points boost", "expires": (d0 + dt.timedelta(days=3)).isoformat(), "once": True}],
                           "predicted_basket_usd": 262.0},
         }))
 
@@ -357,7 +394,15 @@ class Gen:
                               {"sku": "SS-550590", "confidence": 0.9, "reason": "Pet parents with your basket add this"},
                               {"sku": "SS-990451", "confidence": 0.77, "reason": "Matches your weekend buys"},
                               {"sku": "SS-440485", "confidence": 0.3, "reason": "Popular in your area"}],
-                          "price_watch": [], "predicted_basket_usd": 146.0},
+                          "price_watch": [], "predicted_basket_usd": 146.0,
+                          "offers": [
+                              {"offer_id": "OF-DEVON-BED", "kind": "sku_pct", "sku": "SS-550590", "pct_off": 15,
+                               "title": "15% off the Orthopedic Pet Bed", "driver": "browsing history",
+                               "reason": "You looked at it twice, and it's the top add-on for two-dog households",
+                               "expires": (d0 + dt.timedelta(days=5)).isoformat(), "once": True},
+                              {"offer_id": "OF-DEVON-OUT", "kind": "category_pct", "category": "outdoor", "pct_off": 10,
+                               "title": "10% off Sports & outdoors", "driver": "purchase history",
+                               "reason": "Your weekend buys lean outdoors", "expires": (d0 + dt.timedelta(days=9)).isoformat(), "once": False}]},
         }))
 
         # 3. Sofia Alvarez - Plano, TX. Premier member, household of five, bought the limited console last week.
@@ -401,6 +446,14 @@ class Gen:
                               {"sku": "SS-660237", "confidence": 0.66, "reason": "Shoppers with your basket upgrade to this"}],
                           "price_watch": [{"sku": "SS-770336", "competitor": "Oakline Stores", "competitor_price_usd": 184.99,
                                            "seen_on": (d0 - dt.timedelta(days=1)).isoformat()}],
+                          "offers": [
+                              {"offer_id": "OF-SOFIA-TOYS", "kind": "category_pct", "category": "toys", "pct_off": 10,
+                               "title": "Premier early access: 10% off Toys & games", "driver": "loyalty tier",
+                               "reason": "Premier members see the holiday toy offer a week early",
+                               "expires": (d0 + dt.timedelta(days=7)).isoformat(), "once": False},
+                              {"offer_id": "OF-SOFIA-PTS", "kind": "bonus_points", "min_subtotal_usd": 200, "points": 1000,
+                               "title": "1,000 bonus points on $200 or more", "driver": "loyalty tier",
+                               "reason": "A thank-you for 48 orders this year", "expires": (d0 + dt.timedelta(days=4)).isoformat(), "once": True}],
                           "predicted_basket_usd": 171.0},
         }))
         return rows
@@ -422,7 +475,7 @@ def main(argv=None):
     out_dir = os.path.abspath(os.path.join(args.out, f"dt={export_date.isoformat()}"))
     os.makedirs(out_dir, exist_ok=True)
     for f in os.listdir(out_dir):
-        if f.startswith("part-") or f in ("_SUCCESS", "_manifest.json"):
+        if f.startswith("part-") or f in ("_SUCCESS", "_manifest.json", "_pricing_signals.json"):
             os.remove(os.path.join(out_dir, f))
 
     job_uuid = uuid.UUID(int=g.r.getrandbits(128))
@@ -452,8 +505,21 @@ def main(argv=None):
         "export_date": export_date.isoformat(), "schema_version": SCHEMA_VERSION, "model_version": MODEL_VERSION,
         "format": "jsonl", "rows": rows, "stores": len(C.STORES), "bytes": written, "files": files,
         "generator": "databricks/generate_mock_dump.py", "seed": args.seed,
-        "demo_shoppers": ["S00101001", "S00101002", "S00101003"],
+        "demo_shoppers": ["S00101001", "S00101002", "S00101003"], "pricing_signals": "_pricing_signals.json",
     }
+    # What the pricing engine reacts to besides inventory. In production these are the outputs of the
+    # competitor price pipeline, the demand forecast and market-basket analysis.
+    signals = {
+        "source": f"databricks export {export_date.isoformat()}", "export_date": export_date.isoformat(),
+        "market_prices": {sku: {"competitor": c, "price_usd": p} for sku, (c, p) in C.MARKET_PRICES.items()},
+        "high_demand": list(C.HIGH_DEMAND),
+        "time_windows": C.TIME_WINDOWS,
+        "bundles": C.BUNDLES,
+        "pairs_with": {k: [{"sku": x, "reason": why} for x, why in v] for k, v in C.PAIRS_WITH.items()},
+        "upgrades": {k: {"sku": x, "reason": why} for k, (x, why) in C.UPGRADES.items()},
+    }
+    with open(os.path.join(out_dir, "_pricing_signals.json"), "w") as fh:
+        json.dump(signals, fh, indent=2)
     with open(os.path.join(out_dir, "_manifest.json"), "w") as fh:
         json.dump(manifest, fh, indent=2)
     open(os.path.join(out_dir, "_SUCCESS"), "w").close()

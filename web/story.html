@@ -119,7 +119,7 @@
   </div>
   <div class="card dark" style="margin-top:22px">
     <h3>Friday, 8:10 am - the Blue Line, somewhere under Boston</h3>
-    <p class="sub" style="font-size:15px">Maya Chen opens ShopSmart between stations. Her smart cart is already there: the next-basket model scored it at 4:30 am and it reached her phone before she woke up. Coffee pods run out tomorrow, diapers in three days. She adds the stand mixer she has looked at four times, and the app tells her a competitor has it for $26 less. She checks out with a price match: <b>$512.90</b>, priced on the phone at her Plus tier, store credit applied. The phone says <b>On device</b>. At the top of the station stairs it says <b>Awaiting Customer Care</b>, and before she reaches her desk the order is placed at the matched price, with one box of coffee pods backordered and an ETA on the card.</p>
+    <p class="sub" style="font-size:15px">Maya Chen opens ShopSmart between stations. Her smart cart is already there: the next-basket model scored it at 4:30 am and it reached her phone before she woke up. Coffee pods run out tomorrow, diapers in three days. The diapers are 10% off, an offer the model issued because she has bought them six months running, and the wipes beside them complete a bundle. It is 8:10, so the morning coffee promotion is on. She adds the stand mixer she has looked at four times, and the app tells her a competitor has it for $26 less. She checks out with a price match: <b>$496.48</b>, every promotion worked out on the phone from pricing rules that synced before she left home, store credit applied. The phone says <b>On device</b>. At the top of the station stairs it says <b>Awaiting Customer Care</b>, and before she reaches her desk the order is placed at the matched price, with one box of coffee pods backordered and an ETA on the card.</p>
   </div>
   <div class="notes"><b>Talking points.</b> Mobile personalization is an offline problem first and an AI problem second. Every recommendation, price and profile fact the shopper needs is on the phone before they open the app; nothing in the tunnel waits on a network. The AI assistant and the governance come along once the data plane is right.</div>
 </section>
@@ -218,8 +218,51 @@
 </section>
 
 <!-- 6 -->
+<section class="chapter" data-title="Smart merchandising">
+  <div class="kicker">Chapter 6 · Personalized experience & smart merchandising</div>
+  <h2>The right offer, the right price, <em>right now</em>. Even in the tunnel.</h2>
+  <p class="lead">Two things a retailer wants at the moment of purchase: a suggestion that fits this shopper, and a price that fits this hour. Both are usually a live call to a recommender and a pricing service. Here both are documents on the phone.</p>
+  <div class="grid g2" style="margin-top:18px">
+    <div class="card">
+      <span class="tag red">Targeted recommendations</span>
+      <h3 style="margin-top:10px">Purchase history + loyalty data, served at the register</h3>
+      <ul class="clean">
+        <li><b>Offers for you.</b> The nightly model issues personal offers with a reason: 10% off Baby because she has bought diapers six months running; bonus points for a Plus member who orders weekly.</li>
+        <li><b>Cross-sell against the live cart.</b> "Add trash bags to finish the bundle: save $5.28." Computed on the phone from basket affinities in the catalog document.</li>
+        <li><b>Upsell.</b> The value box at 28 cents a diaper instead of 30. One tap swaps it in.</li>
+        <li><b>Measured.</b> Every order line records what put the item in front of the shopper.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <span class="tag red">Dynamic pricing & bundling</span>
+      <h3 style="margin-top:10px">Rules that follow inventory, the clock and the market</h3>
+      <ul class="clean">
+        <li><b>Inventory.</b> 5x normal stock: marked down 15%. One box left: pulled from every promotion, and the bundle it belongs to pauses.</li>
+        <li><b>Peak hours.</b> Breakfast items 10% off in the quiet morning; 5% off for store pickup during the evening delivery peak.</li>
+        <li><b>Competitor data.</b> A competitor within 8% of list is matched automatically. A bigger gap goes to Customer Care for approval, through AOM.</li>
+        <li><b>Bundles.</b> Curated from basket analysis, plus one the engine builds itself around the most overstocked item.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="flow" style="grid-template-columns: repeat(4, 1fr); margin-top:18px">
+    <div class="node dbx"><b>Databricks · 4:30 am</b>Offers per shopper, basket affinities, competitor prices, demand forecast. One file beside the export.<span class="cost ok">1 run / day</span></div>
+    <div class="node cb"><b>Pricing engine + Couchbase</b>Signals + live inventory become one small rules document per fulfillment center, rebuilt when an input changes.<span class="cost ok">rules, not prices</span></div>
+    <div class="node cb"><b>Sync Gateway</b>Channel <code>fc:&lt;center&gt;</code>: each phone gets only the rules for the center that serves it.<span class="cost ok">seconds</span></div>
+    <div class="node cb"><b>Couchbase Lite</b>The app prices the cart with the same arithmetic as the backend. The order carries the rule version and hour, so the price the shopper saw is the price charged.<span class="cost ok">0 pricing calls</span></div>
+  </div>
+  <div class="grid g4" style="margin-top:18px">
+    <div class="card"><div class="sub">Recommendation-led revenue</div><div class="big live" id="x_rev">-</div><div class="sub">picks, cross-sell, upsell, bundles, deals, offers</div></div>
+    <div class="card"><div class="sub">Automatic repricings</div><div class="big live" id="x_reprice">-</div><div class="sub">pricing clock: <span id="x_hour">-</span></div></div>
+    <div class="card"><div class="sub">Orders with a promotion</div><div class="big live" id="x_promo">-</div><div class="sub"><span id="x_bundles">-</span> bundles sold · <span id="x_offers">-</span> offers used</div></div>
+    <div class="card"><div class="sub">Orders price-locked</div><div class="big live" id="x_lock">-</div><div class="sub">priced on the phone, honored when they synced</div></div>
+  </div>
+  <p class="legend" style="margin-top:10px"><span id="x_last">Open the <a href="/merch" target="_blank">merchandising console</a>, overstock an item or move the clock, and watch a signed-in phone re-price.</span></p>
+  <div class="notes"><b>Talking points.</b> The usual build is a recommender API and a pricing API on the checkout path: two more services that must be up, fast and paid for on every cart view, and that do nothing with no signal. Here the model's output and the pricing rules are data. Couchbase holds them, Sync Gateway fans them out by channel, and the phone does the arithmetic. Three things to show: the price changes on the phone seconds after the console changes stock; it keeps working with <i>No signal</i> on; and an order priced at 9:40 keeps the breakfast promotion even if it syncs at 10:05, because the order names the rule version it was priced with.</div>
+</section>
+
+<!-- 7 -->
 <section class="chapter" data-title="Where the Databricks money goes">
-  <div class="kicker">Chapter 6 · Where the Databricks money goes</div>
+  <div class="kicker">Chapter 7 · Where the Databricks money goes</div>
   <h2>Per-request serving vs. nightly export + Couchbase.</h2>
   <table style="margin-top:14px">
     <thead><tr><th></th><th>Serve from Databricks per request</th><th>Export nightly, serve from Couchbase</th></tr></thead>
@@ -229,38 +272,41 @@
       <tr><td><b>Model Serving</b></td><td>Score recommendations per request; endpoint kept hot</td><td class="cb">Scored once in the job; results travel with the export</td></tr>
       <tr><td><b>Assistant context</b></td><td>Fresh warehouse reads for every question</td><td class="cb">AOM Context Cache + Couchbase copy, invalidated by export date / shopper rev</td></tr>
       <tr><td><b>LLM tokens</b></td><td>Every shopper's "how does X work?" is a new call</td><td class="cb">LLM cache: exact and semantic hits across shoppers</td></tr>
+      <tr><td><b>Offers, cross-sell, pricing</b></td><td>A recommender call and a pricing call on every cart view</td><td class="cb">Offers and rules sync as documents; the phone computes them</td></tr>
       <tr><td><b>No signal</b></td><td>No home feed, no checkout, an abandoned cart</td><td class="cb">Everything renders and orders are captured from Couchbase Lite</td></tr>
       <tr><td><b>Governance</b></td><td>Each team wires its own approvals and audit</td><td class="cb">AOM: RBAC, tool scope, approvals, traces, audit for every action</td></tr>
       <tr><td><b>Freshness</b></td><td>Live, but a smart cart only needs this morning's scores</td><td class="cb">This morning's export + live order and preference state in Couchbase</td></tr>
     </tbody>
   </table>
-  <div class="notes"><b>Talking points.</b> This is not "Couchbase instead of Databricks." It's Databricks for what it's for, the nightly join and the model, and Couchbase for the millions of reads a day that follow. Set <code>DBX_COST_PER_QUERY_USD</code> to the customer's blended per-query figure and the previous chapter shows the number in dollars.</div>
+  <div class="notes"><b>Talking points.</b> This is not "Couchbase instead of Databricks." It's Databricks for what it's for, the nightly join and the model, and Couchbase for the millions of reads a day that follow. Set <code>DBX_COST_PER_QUERY_USD</code> to the customer's blended per-query figure and chapter 5 shows the number in dollars.</div>
 </section>
 
-<!-- 7 -->
+<!-- 8 -->
 <section class="chapter" data-title="See it run">
-  <div class="kicker">Chapter 7 · See it run</div>
-  <h2>Ten minutes, three shoppers.</h2>
+  <div class="kicker">Chapter 8 · See it run</div>
+  <h2>Twelve minutes, three shoppers, one console.</h2>
   <div class="grid g2" style="margin-top:16px">
     <div class="card">
       <h3>Open</h3>
       <ul class="clean">
         <li><a href="/">The app</a> - sign in as a demo shopper (member number + last name are on the sign-in screen)</li>
         <li><a id="aomLink" href="#" target="_blank">AOM dashboard</a> - Agents, Servers, Knowledge, Context Cache, RAG Applications, Approvals, Traces</li>
+        <li><a href="/merch" target="_blank">Merchandising console</a> - live pricing rules, bundles, and levers for stock, the clock and competitor prices</li>
         <li><a href="/api/status" target="_blank">/api/status</a> - export load, KB publishing, Databricks offload counters</li>
       </ul>
     </div>
     <div class="card">
       <h3>Script</h3>
       <ol class="clean" style="padding-left:20px">
-        <li><b>Maya Chen (204817 / Chen).</b> Home shows her smart cart, built from the model at Plus prices. Tap her initials and turn on <i>No signal</i>. Shop → search "mixer" → add it; the Cart offers a <b>price match</b>. Place the order: <b>On device</b>. Ask the assistant "What am I running low on?" → answered on device. Turn signal back on: AOM holds the order → <b>Awaiting Customer Care</b>. Approve in AOM → <b>Partially shipped</b> (coffee pods are short); her wallet and recommendations update on the phone.</li>
+        <li><b>Maya Chen (204817 / Chen).</b> Home shows her smart cart, her two offers and today's deals. Tap her initials and turn on <i>No signal</i>. In the Cart, tap <b>Add ToughLine Tall Kitchen Trash Bags</b> to finish a bundle, then Shop → "mixer" → add it; the Cart offers a <b>price match</b>. Place the order: <b>On device</b>. Ask the assistant "Any deals for me today?" → answered on device. Turn the signal back on, approve the price match in AOM, and the order confirms at the price the phone showed.</li>
+        <li><b>Merchandising console.</b> With Maya signed in, click <b>Overstock</b> on any item and move the clock to 18: her phone re-prices in seconds and the Cart suggests store pickup for 5% off.</li>
         <li><b>Ask "How does a price match work?" twice.</b> Second time: <i>Context cache · hit</i> and <i>LLM cache · exact hit</i>.</li>
         <li><b>Devon Walker (318552 / Walker).</b> Rural dead zones. Same policy question → cache hit from Maya's turn. The dog food is out of stock: the order backorders it. Put it on Subscribe & Save.</li>
         <li><b>Sofia Alvarez (427190 / Alvarez).</b> Add the Nova X console: the cart warns about the purchase limit, and the order is refused with <b>purchase_limit</b>. Ask for a goodwill credit (held for approval), then hide Electronics in preferences and watch her picks re-rank.</li>
       </ol>
     </div>
   </div>
-  <div class="notes"><b>Talking points.</b> Finish on Chapter 5: the counters moved because of what you just did, and every one of them is a query Databricks didn't run.</div>
+  <div class="notes"><b>Talking points.</b> Finish on Chapters 5 and 6: the counters moved because of what you just did. Every one in chapter 5 is a query Databricks didn't run; chapter 6 is revenue that came through a recommendation.</div>
 </section>
 
 </main>
@@ -284,7 +330,7 @@
     document.getElementById('navTitle').textContent = `${idx + 1} / ${chapters.length} · ${chapters[idx].dataset.title}`;
     location.hash = String(idx + 1);
     window.scrollTo(0, 0);
-    if (idx === 4) refresh();
+    if (idx === 4 || idx === 5) refresh();
   }
   document.getElementById('prevBtn').onclick = () => show(idx - 1);
   document.getElementById('nextBtn').onclick = () => show(idx + 1);
@@ -410,13 +456,21 @@
       set('m_appr', m.orders_awaiting_approval || 0);
       set('m_export', s.export_date || '-'); set('m_rows', (s.load && s.load.rows || 0).toLocaleString()); set('m_recs', (s.load && s.load.recommendations_built || 0).toLocaleString());
       set('m_ms', (m.model_serving_calls_avoided || 0).toLocaleString());
+      const x = m.merchandising || {}, pr = s.pricing || {};
+      set('x_rev', '$' + (x.recommendation_led_revenue_usd || 0).toLocaleString(undefined, {maximumFractionDigits: 0}));
+      set('x_reprice', pr.repricings || 0);
+      set('x_hour', pr.hour == null ? '-' : `${((pr.hour + 11) % 12) + 1} ${pr.hour < 12 ? 'am' : 'pm'}`);
+      set('x_promo', x.orders_with_promotion || 0); set('x_bundles', x.bundles_sold || 0); set('x_offers', x.offers_redeemed || 0);
+      set('x_lock', x.orders_price_locked || 0);
+      const last = (pr.recent_changes || [])[0];
+      if (last) document.getElementById('x_last').textContent = `Latest change by the engine: ${last.text}`;
       if (s.aom && s.aom.dashboard_url) document.getElementById('aomLink').href = s.aom.dashboard_url;
       document.getElementById('liveNote').textContent = `Live from /api/status · store: ${s.store} · AOM ${s.aom && s.aom.configured ? 'connected' : 'not configured (local fallbacks)'} · ${new Date().toLocaleTimeString()}`;
     } catch (e) {
       document.getElementById('liveNote').textContent = 'Backend not reachable at /api/status yet.';
     }
   }
-  setInterval(() => { if (idx === 4) refresh(); }, 5000);
+  setInterval(() => { if (idx === 4 || idx === 5) refresh(); }, 5000);
 
   document.addEventListener('keydown', e => {
     if (e.target.tagName === 'INPUT') return;

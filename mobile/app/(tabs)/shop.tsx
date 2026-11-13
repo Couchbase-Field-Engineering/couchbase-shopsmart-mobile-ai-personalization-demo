@@ -1,30 +1,37 @@
 import { Ionicons } from '@expo/vector-icons';
-import { router } from 'expo-router';
-import { useMemo, useState } from 'react';
+import { router, useLocalSearchParams } from 'expo-router';
+import { useEffect, useMemo, useState } from 'react';
 import { FlatList, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useData } from '@/src/data/DataContext';
-import { unitPrice } from '@/src/pricing';
+import { dealOf, dealText, priceOne } from '@/src/pricing';
 import { theme } from '@/src/theme';
 import type { Product } from '@/src/types';
 import { ChoiceRow } from '@/src/ui/Choice';
 import { Card, Empty, money2, Pill, ProductThumb, shortName, SyncBadge } from '@/src/ui/components';
 
-/** The whole catalog, searchable from Couchbase Lite - prices, stock notes and aisles work with no signal. */
+/** The whole catalog, searchable from Couchbase Lite - prices, live promotions, stock notes and aisles work with no signal. */
 export default function Shop() {
-  const { snap, sync, cart, addToCart } = useData();
+  const { snap, sync, cart, addToCart, price } = useData();
+  const params = useLocalSearchParams<{ category?: string }>();
   const insets = useSafeAreaInsets();
   const [q, setQ] = useState('');
   const [category, setCategory] = useState<string>('all');
   const cat = snap.catalog;
   const me = snap.shopper;
+  // An offer or the Home screen's "All deals" link opens the tab already filtered.
+  useEffect(() => {
+    if (params.category) setCategory(params.category);
+  }, [params.category]);
+  const rules = snap.pricing?.sku_rules ?? {};
+  const onDeal = (sku: string) => !!price && !!dealOf(priceOne(price, sku));
   const hidden = new Set(me?.preferences.avoid_categories ?? []);
   const buys = me?.replenishment ?? {};
 
   const items = useMemo(() => {
     const words = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
     return (cat?.products ?? [])
-      .filter((p) => category === 'all' || p.category === category)
+      .filter((p) => category === 'all' || (category === 'deals' ? onDeal(p.sku) : p.category === category))
       .filter((p) => {
         if (!words.length) return true;
         const hay = `${p.name} ${p.sku} ${p.tags.join(' ')} ${cat?.categories[p.category] ?? ''}`.toLowerCase();
@@ -33,16 +40,20 @@ export default function Shop() {
       // What this shopper buys comes first; categories they hid go last.
       .sort((a, b) => Number(hidden.has(a.category)) - Number(hidden.has(b.category)) || Number(!!buys[b.sku]) - Number(!!buys[a.sku]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q, category, cat, me?.rev]);
+  }, [q, category, cat, me?.rev, price]);
 
-  const options = [{ value: 'all', label: 'All' }, ...Object.entries(cat?.categories ?? {}).map(([value, label]) => ({ value, label }))];
+  const options = [{ value: 'all', label: 'All' }, { value: 'deals', label: 'Deals' }, ...Object.entries(cat?.categories ?? {}).map(([value, label]) => ({ value, label }))];
 
   const Row = ({ p }: { p: Product }) => {
-    const unit = me ? unitPrice(cat, me, p.list_price, 1) : p.list_price;
+    const line = price ? priceOne(price, p.sku) : null;
+    const unit = line?.unit ?? p.list_price;
+    const deal = dealOf(line);
+    const noPromo = rules[p.sku]?.no_promo;
+    const src = deal ? (deal.rule === 'offer' ? 'offer' : 'deal') : 'browse';
     const aisle = snap.store?.aisles?.[p.sku];
     const inCart = cart[p.sku] ?? 0;
     return (
-      <Pressable onPress={() => router.push({ pathname: '/product', params: { sku: p.sku } })} style={({ pressed }) => [{ marginBottom: 10, opacity: pressed ? 0.92 : 1 }]}>
+      <Pressable onPress={() => router.push({ pathname: '/product', params: { sku: p.sku, src } })} style={({ pressed }) => [{ marginBottom: 10, opacity: pressed ? 0.92 : 1 }]}>
         <Card style={styles.row}>
           <ProductThumb category={p.category} size={56} />
           <View style={{ flex: 1, gap: 3 }}>
@@ -51,11 +62,13 @@ export default function Shop() {
             <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
               <Text style={styles.price}>{money2(unit)}</Text>
               {unit < p.list_price ? <Text style={styles.was}>{money2(p.list_price)}</Text> : null}
+              {deal ? <Pill label={dealText(deal)} tone="red" icon={deal.rule === 'offer' ? 'gift-outline' : deal.rule === 'time' ? 'time-outline' : 'trending-down'} /> : null}
+              {noPromo ? <Pill label={noPromo.label} tone="warn" icon="flame-outline" /> : null}
               {buys[p.sku] ? <Pill label="You buy this" tone="neutral" icon="repeat-outline" /> : null}
               {p.limit_per_household ? <Pill label={`Limit ${p.limit_per_household}`} tone="warn" /> : null}
             </View>
           </View>
-          <Pressable onPress={() => addToCart(p.sku)} style={[styles.round, inCart > 0 && { backgroundColor: theme.color.ink }]} accessibilityLabel={`Add ${shortName(p.name)} to cart`}>
+          <Pressable onPress={() => addToCart(p.sku, 1, src)} style={[styles.round, inCart > 0 && { backgroundColor: theme.color.ink }]} accessibilityLabel={`Add ${shortName(p.name)} to cart`}>
             {inCart ? <Text style={styles.count}>{inCart}</Text> : <Ionicons name="add" size={20} color={theme.color.onDark} />}
           </Pressable>
         </Card>
@@ -86,7 +99,9 @@ export default function Shop() {
         renderItem={({ item }) => <Row p={item} />}
         contentContainerStyle={styles.list}
         keyboardShouldPersistTaps="handled"
-        ListEmptyComponent={<Empty icon="search-outline" title="Nothing matches" body="Try a different word or pick another category." />}
+        ListEmptyComponent={category === 'deals' && !q
+          ? <Empty icon="pricetags-outline" title="No promotions right now" body="Prices here follow stock, the hour and competitor prices. Every price is already your member price." />
+          : <Empty icon="search-outline" title="Nothing matches" body="Try a different word or pick another category." />}
       />
     </View>
   );
